@@ -527,12 +527,14 @@ fn convert_debugaltlink_pair(
     std::fs::write(&payload, section).unwrap();
 
     let linked = directory.join("altlink.linked");
-    run(Command::new("objcopy").args([
-        "--add-section",
-        &format!(".gnu_debugaltlink={}", payload.display()),
-        image.to_str().unwrap(),
-        linked.to_str().unwrap(),
-    ]));
+    run(
+        Command::new(crate::tools::required_tool("x86_64-linux-gnu-objcopy")).args([
+            "--add-section",
+            &format!(".gnu_debugaltlink={}", payload.display()),
+            image.to_str().unwrap(),
+            linked.to_str().unwrap(),
+        ]),
+    );
     ElfConverter::new(ConversionOptions::default())
         .convert_path(&linked)
         .unwrap()

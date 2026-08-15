@@ -226,12 +226,11 @@ pub(crate) struct DiscoveryToggles {
     #[arg(long)]
     pub(crate) no_discovery: bool,
 
-    /// Allow debuginfod network requests during a batch conversion.
+    /// Do not make debuginfod network requests.
     ///
-    /// Single-file conversion honors `DEBUGINFOD_URLS` automatically. Batch
-    /// conversion is local-only unless this flag is passed.
+    /// Local debug links, build-ID roots, and DWO/DWP paths are still searched.
     #[arg(long, conflicts_with = "no_discovery")]
-    pub(crate) debuginfod: bool,
+    pub(crate) no_debuginfod: bool,
 }
 
 /// How much per-function detail the DWARF import keeps.
@@ -660,6 +659,18 @@ mod tests {
         ])
         .unwrap_err();
         assert_eq!(zero_jobs.kind(), ErrorKind::ValueValidation);
+
+        let conflict = Cli::try_parse_from([
+            "gsymtool",
+            "convert",
+            "bin",
+            "--output-dir",
+            "out",
+            "--no-discovery",
+            "--no-debuginfod",
+        ])
+        .unwrap_err();
+        assert_eq!(conflict.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -674,7 +685,7 @@ mod tests {
             "--recursive",
             "--jobs",
             "8",
-            "--debuginfod",
+            "--no-debuginfod",
         ]) else {
             panic!("valid batch command was rejected");
         };
@@ -687,7 +698,7 @@ mod tests {
         );
         assert_eq!(arguments.output_dir, Some(PathBuf::from("out")));
         assert_eq!(arguments.jobs, NonZeroUsize::new(8));
-        assert!(arguments.sources.discovery.debuginfod);
+        assert!(arguments.sources.discovery.no_debuginfod);
         assert!(arguments.recursive);
         assert!(arguments.output.is_none());
     }

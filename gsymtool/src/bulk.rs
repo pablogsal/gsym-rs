@@ -112,7 +112,7 @@ pub(crate) fn run(
         && !converter.options().debuginfod_urls.is_empty()
     {
         terminal.status(format_args!(
-            "debuginfod enabled ({}); requests use the live progress line; pass --verbose to log each one or --no-discovery for local-only conversion",
+            "debuginfod enabled ({}); requests use the live progress line; pass --verbose to log each one or --no-debuginfod for local-only conversion",
             converter.options().debuginfod_urls.join(", ")
         ))?;
     }

@@ -77,12 +77,7 @@ fn convert(arguments: ConvertArgs, terminal: &mut Terminal) -> Result<()> {
         sources,
         dwarf,
     } = arguments;
-    let converter = ElfConverter::new(conversion_options(
-        version,
-        &sources,
-        &dwarf,
-        output_dir.is_some(),
-    ));
+    let converter = ElfConverter::new(conversion_options(version, &sources, &dwarf));
     if let Some(directory) = output_dir {
         return bulk::run(
             &converter,
@@ -112,7 +107,6 @@ fn conversion_options(
     version: CliVersion,
     sources: &SourceToggles,
     dwarf: &DwarfToggles,
-    batch: bool,
 ) -> ConversionOptions {
     let mut options = ConversionOptions::default();
     options.writer.version = version.into();
@@ -121,13 +115,17 @@ fn conversion_options(
         inline_info: !dwarf.no_inline,
         call_sites: dwarf.call_sites,
     });
-    if sources.discovery.no_discovery {
+    apply_discovery_toggles(&mut options, &sources.discovery);
+    options
+}
+
+fn apply_discovery_toggles(options: &mut ConversionOptions, toggles: &cli::DiscoveryToggles) {
+    if toggles.no_discovery {
         options.discovery = DiscoveryPolicy::Disabled;
         options.debuginfod_urls.clear();
-    } else if batch && !sources.discovery.debuginfod {
+    } else if toggles.no_debuginfod {
         options.debuginfod_urls.clear();
     }
-    options
 }
 
 fn convert_single(
@@ -538,6 +536,31 @@ mod tests {
     use clap::Parser;
 
     use super::*;
+
+    #[test]
+    fn debuginfod_is_enabled_by_default_and_can_be_disabled() {
+        let mut options = ConversionOptions {
+            debuginfod_urls: vec!["https://debuginfod.example".to_owned()],
+            ..ConversionOptions::default()
+        };
+        apply_discovery_toggles(
+            &mut options,
+            &cli::DiscoveryToggles {
+                no_discovery: false,
+                no_debuginfod: false,
+            },
+        );
+        assert_eq!(options.debuginfod_urls.len(), 1);
+
+        apply_discovery_toggles(
+            &mut options,
+            &cli::DiscoveryToggles {
+                no_discovery: false,
+                no_debuginfod: true,
+            },
+        );
+        assert!(options.debuginfod_urls.is_empty());
+    }
 
     #[test]
     fn renders_binary_names_and_build_ids_without_intermediate_strings() {
