@@ -1,0 +1,21 @@
+[package]
+name = "gsymtool"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Command-line tools for the gsym-rs library"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anstream = "1.0"
+anstyle = "1.0"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+hex = "0.4"
+gsym-rs = { path = "..", features = ["convert", "debuginfod", "mmap"] }
+tempfile = "3.20"

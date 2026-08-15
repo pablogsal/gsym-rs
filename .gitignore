@@ -1,0 +1,7 @@
+/target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/coverage/
+/benchmark-results/
+__pycache__/

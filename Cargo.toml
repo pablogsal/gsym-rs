@@ -1,0 +1,177 @@
+[package]
+name = "gsym-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Pure-Rust reader, writer, and Linux ELF/DWARF converter for LLVM GSYM"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pablogsal/gsym-rs"
+keywords = ["gsym", "dwarf", "elf", "symbolication", "debugging"]
+categories = ["development-tools::debugging", "parser-implementations"]
+readme = "README.md"
+exclude = ["/.github", "/assets", "/fuzz", "/scripts"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "gsym"
+path = "src/lib.rs"
+
+[workspace]
+members = ["gsymtool"]
+resolver = "3"
+
+[features]
+default = ["mmap", "convert"]
+mmap = ["dep:memmap2"]
+convert = ["dep:crc32fast", "dep:gimli", "dep:hex", "dep:lzma-rs", "dep:object"]
+debuginfod = ["convert", "dep:debuginfod-client"]
+
+[dependencies]
+crc32fast = { version = "1.5", optional = true }
+gimli = { version = "0.34", optional = true, default-features = false, features = ["read", "std"] }
+hashbrown = { version = "0.17", default-features = false, features = ["inline-more"] }
+hex = { version = "0.4", optional = true, default-features = false, features = ["std"] }
+memmap2 = { version = "0.9.8", optional = true }
+lzma-rs = { version = "0.3", optional = true }
+object = { version = "0.40", optional = true, default-features = false, features = ["read", "compression", "elf", "std"] }
+smallvec = "1.15"
+thiserror = "2.0"
+zerocopy = "0.8.56"
+debuginfod-client = { package = "debuginfod", version = "0.3", optional = true, default-features = false, features = ["reqwest"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+proptest = "1.7"
+tempfile = "3.20"
+
+[[bench]]
+name = "gsym"
+harness = false
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+[lints]
+workspace = true
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+unused_import_braces = "warn"
+unused_macro_rules = "warn"
+let_underscore_drop = "warn"
+meta_variable_misuse = "warn"
+non_ascii_idents = "deny"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+single_use_lifetimes = "warn"
+variant_size_differences = "warn"
+redundant_lifetimes = "warn"
+ffi_unwind_calls = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+as_ptr_cast_mut = "warn"
+branches_sharing_code = "warn"
+clear_with_drain = "warn"
+coerce_container_to_any = "warn"
+collection_is_never_read = "warn"
+debug_assert_with_mut_call = "warn"
+derive_partial_eq_without_eq = "warn"
+doc_link_code = "warn"
+equatable_if_let = "warn"
+fallible_impl_from = "warn"
+future_not_send = "warn"
+imprecise_flops = "warn"
+iter_on_empty_collections = "warn"
+iter_on_single_items = "warn"
+iter_with_drain = "warn"
+large_stack_frames = "warn"
+literal_string_with_formatting_args = "warn"
+missing_const_for_fn = "warn"
+needless_collect = "warn"
+needless_pass_by_ref_mut = "warn"
+needless_type_cast = "warn"
+non_send_fields_in_send_ty = "warn"
+nonstandard_macro_braces = "warn"
+option_if_let_else = "warn"
+or_fun_call = "warn"
+path_buf_push_overwrite = "warn"
+read_zero_byte_vec = "warn"
+redundant_clone = "warn"
+search_is_some = "warn"
+set_contains_or_insert = "warn"
+significant_drop_in_scrutinee = "warn"
+significant_drop_tightening = "warn"
+single_option_map = "warn"
+string_lit_as_bytes = "warn"
+suboptimal_flops = "warn"
+suspicious_operation_groupings = "warn"
+too_long_first_doc_paragraph = "warn"
+trailing_empty_array = "warn"
+trait_duplication_in_bounds = "warn"
+transmute_undefined_repr = "warn"
+trivial_regex = "warn"
+tuple_array_conversions = "warn"
+type_repetition_in_bounds = "warn"
+uninhabited_references = "warn"
+unnecessary_struct_initialization = "warn"
+unused_peekable = "warn"
+unused_rounding = "warn"
+use_self = "warn"
+useless_let_if_seq = "warn"
+volatile_composites = "warn"
+while_float = "warn"
+
+cargo_common_metadata = "warn"
+negative_feature_names = "warn"
+redundant_feature_names = "warn"
+wildcard_dependencies = "warn"
+
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+as_underscore = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+empty_drop = "warn"
+empty_enum_variants_with_brackets = "warn"
+exit = "warn"
+filetype_is_file = "warn"
+float_cmp_const = "warn"
+fn_to_numeric_cast_any = "warn"
+infinite_loop = "warn"
+lossy_float_literal = "warn"
+mem_forget = "warn"
+mixed_read_write_in_expression = "warn"
+mutex_atomic = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+same_name_method = "warn"
+str_to_string = "warn"
+string_slice = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_self_imports = "warn"
+unneeded_field_pattern = "warn"
+unwrap_in_result = "warn"
+verbose_file_reads = "warn"
+wildcard_enum_match_arm = "warn"

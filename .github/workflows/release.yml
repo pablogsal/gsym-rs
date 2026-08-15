@@ -1,0 +1,361 @@
+name: Release
+
+# Releases are dispatched, never pushed. The workflow builds and verifies every
+# artifact first and only then publishes the crate and creates the tag. Running
+# it with the default `dry-run` tag rehearses everything except those two
+# irreversible steps.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - CHANGELOG.md
+      - Cargo.lock
+      - Cargo.toml
+      - LICENSE-APACHE
+      - LICENSE-MIT
+      - RELEASE.md
+      - scripts/**
+  push:
+    branches:
+      - release-ci-test/**
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Exact vX.Y.Z tag, or dry-run to build without publishing"
+        required: true
+        default: dry-run
+        type: string
+      publish-crate:
+        description: "Publish with trusted publishing (disable only after a manual bootstrap publish)"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag || 'dry-run' }}
+  # A rehearsal push is superseded by the next one; a dispatched release is not.
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUST_TOOLCHAIN: "1.97.0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: Plan and validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      tag: ${{ steps.contracts.outputs.tag }}
+      version: ${{ steps.contracts.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: contracts
+        name: Validate the release contracts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PUBLISH_CRATE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish-crate || false }}
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || 'dry-run' }}
+        run: |
+          registry_check=()
+          if [[ "$REQUESTED_TAG" != dry-run ]]; then
+            if [[ "$PUBLISH_CRATE" == true ]]; then
+              registry_check+=(--check-crates-io)
+            else
+              registry_check+=(--require-crates-io)
+            fi
+          fi
+          version=$(python3 scripts/release_contract.py \
+            --tag "$REQUESTED_TAG" --check-availability \
+            "${registry_check[@]}" --print-version)
+          {
+            echo "tag=$REQUESTED_TAG"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: matrix
+        name: Read the reviewed release matrix
+        run: echo "matrix=$(python3 scripts/release_common.py --matrix)" >> "$GITHUB_OUTPUT"
+
+  trusted-publishing:
+    name: Check crates.io trusted publishing
+    needs: plan
+    # Minting a token proves that crates.io trusts this repository, workflow,
+    # and environment before anything irreversible happens. Only dispatched
+    # runs can enter the release environment, so rehearsal branches skip this.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish-crate }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - id: auth
+        name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Confirm that crates.io issued a token
+        env:
+          CRATES_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          if [[ -z "$CRATES_TOKEN" ]]; then
+            echo "crates.io did not issue a trusted publishing token" >&2
+            exit 1
+          fi
+          echo "crates.io trusted publishing is configured for this workflow"
+
+      # Assembling the tarball is the part that can fail at release time; CI
+      # already compiles the packaged crate on every pull request, and the real
+      # publish below verifies it again before uploading anything.
+      - name: Assemble the package exactly as it would be published
+        run: cargo publish --package gsym-rs --dry-run --no-verify --locked
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: plan
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      # Released binaries are compiled cold on purpose; only the registry, which
+      # --locked and cargo's checksums already pin, is restored from cache.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-targets: "false"
+
+      - name: Install the cross-compilation packages
+        if: ${{ matrix.packages != '' }}
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          read -ra packages <<< "$PACKAGES"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+
+      - name: Select the target linker
+        if: ${{ matrix.linker != '' }}
+        env:
+          LINKER: ${{ matrix.linker }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          underscored=${TARGET//-/_}
+          {
+            echo "CC_${underscored}=${LINKER}"
+            echo "CARGO_TARGET_${underscored^^}_LINKER=${LINKER}"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify that the runner is native for this target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [[ "${host%%-*}" != "${TARGET%%-*}" ]]; then
+            echo "expected a ${TARGET%%-*} runner, got $host" >&2
+            exit 1
+          fi
+
+      - name: Build gsymtool
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          TARGET: ${{ matrix.target }}
+        run: cargo build --package gsymtool --release --locked --target "$TARGET"
+
+      - name: Assemble and verify the release archive
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          python3 scripts/build_release_archive.py \
+            --binary "target/${TARGET}/release/gsymtool" \
+            --target "$TARGET" \
+            --version "$VERSION"
+          python3 scripts/verify_release_archive.py --target "$TARGET" --version "$VERSION"
+
+      - name: Upload the verified archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-target-${{ matrix.target }}
+          path: distrib/
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    name: Assemble the release payload
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download every verified archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-target-*
+          path: distrib
+          merge-multiple: true
+
+      - name: Build the exact release payload
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: >-
+          python3 scripts/prepare_release_assets.py
+          --version "$VERSION" --input distrib --output release-assets
+
+      - name: Upload the release payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-crates-io:
+    name: Publish to crates.io
+    needs: [plan, assemble, trusted-publishing]
+    if: ${{ needs.plan.outputs.tag != 'dry-run' && inputs.publish-crate }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - id: auth
+        name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish the library
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --package gsym-rs --locked
+
+      - name: Wait until crates.io serves the new version
+        run: python3 scripts/release_contract.py --wait-for-crates-io
+
+  publish-github:
+    name: Tag and publish the GitHub release
+    needs: [plan, assemble, trusted-publishing, publish-crates-io]
+    # The tag is created last: after every artifact has been built, verified,
+    # and re-validated, and after the crate itself is on crates.io. A failure
+    # anywhere before this point leaves no tag and no release behind, so the
+    # same version can simply be dispatched again. The needed jobs are skipped
+    # rather than run when crates.io publishing is turned off, hence the
+    # per-job result checks.
+    if: >-
+      ${{ !cancelled()
+      && needs.plan.outputs.tag != 'dry-run'
+      && needs.assemble.result == 'success'
+      && needs.trusted-publishing.result != 'failure'
+      && needs.publish-crates-io.result != 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      attestations: write
+      contents: write # Required only here, to create the tag and the release.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the release payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Re-validate the contracts and the payload
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          python3 scripts/release_contract.py \
+            --tag "$RELEASE_TAG" \
+            --check-availability \
+            --notes-out release-notes.md
+          python3 scripts/prepare_release_assets.py \
+            --version "$VERSION" --input release-assets --output revalidated-assets
+
+      # Remove this step if the repository cannot produce attestations.
+      - name: Attest the build provenance of every archive
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-assets/*.tar.gz
+
+      - name: Create the tag and the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "gsym-rs $VERSION" \
+            --notes-file release-notes.md \
+            release-assets/*
+
+      - name: Verify the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          published=$(gh release view "$RELEASE_TAG" --json assets --jq '[.assets[].name]|sort|@tsv')
+          expected=$(python3 scripts/release_common.py --plan "$VERSION" | jq -r '.assets|sort|@tsv')
+          if [[ "$published" != "$expected" ]]; then
+            echo "published assets do not match the plan" >&2
+            printf 'published: %s\nexpected:  %s\n' "$published" "$expected" >&2
+            exit 1
+          fi
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq .object.sha)
+          if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "tag $RELEASE_TAG points at $tag_sha, not $GITHUB_SHA" >&2
+            exit 1
+          fi

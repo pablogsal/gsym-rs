@@ -1,0 +1,20 @@
+msrv = "1.88"
+
+too-large-for-stack = 128
+
+cognitive-complexity-threshold = 25
+too-many-lines-threshold = 120
+type-complexity-threshold = 250
+excessive-nesting-threshold = 6
+
+doc-valid-idents = [
+    "GSYM",
+    "DWARF",
+    "ELF",
+    "LLVM",
+    "BlazeSym",
+    "debuginfod",
+    "gsymutil",
+    "MSRV",
+    "..",
+]
