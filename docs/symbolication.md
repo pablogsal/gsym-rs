@@ -106,10 +106,9 @@ for frame in hit.frames() {
 ```
 
 Names and paths are byte slices, not `str`. GSYM stores whatever bytes the
-producer stored, and this crate does not reject non-UTF-8 data, so a symbol from
-a different mangling scheme or a path from a different locale still round-trips.
-Render with `String::from_utf8_lossy`, or validate with `str::from_utf8` to
-reject invalid data.
+producer stored, so a symbol from a different mangling scheme or a path from a
+different locale round-trips intact. Render with `String::from_utf8_lossy`, or
+validate with `str::from_utf8`.
 
 `Ok(None)` means no function covers the address. That is a normal answer for
 padding between functions, for addresses from another module, and for an address
@@ -184,9 +183,8 @@ give each thread its own `LookupScratch`.
 
 ## Untrusted input
 
-A malformed file produces an [`Error`](crate::Error) rather than a panic.
-Parsing checks the file's structure, and a bad function record is reported by
-the lookup that reads it.
+Parsing checks the file's structure, and a bad function record surfaces as an
+[`Error`](crate::Error) from the lookup that reads it.
 
 To find that out up front instead, [`Gsym::verify`](crate::Gsym::verify) checks
 every function and everything it references, and returns what it counted.
@@ -209,12 +207,10 @@ than in front of each lookup.
 
 ## Further reading
 
-Elsewhere in these docs:
-
 - [Format](crate::docs::format) for what a GSYM file contains
 - [Cookbook](crate::docs::cookbook) for worked examples of every API used above
 
-For the runtime half of the problem, which this crate does not solve:
+For the runtime half of the problem, finding the module and its load bias:
 
 - [`dl_iterate_phdr(3)`](https://man7.org/linux/man-pages/man3/dl_iterate_phdr.3.html)
   enumerates loaded modules and reports the load bias (`dlpi_addr`) and program

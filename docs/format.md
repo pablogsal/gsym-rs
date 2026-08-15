@@ -1,8 +1,8 @@
 # The GSYM file format
 
 What is in a GSYM file, for debugging one by hand or comparing output against
-`llvm-gsymutil`. Using the API does not require any of it; start with
-[symbolication](crate::docs::symbolication) for that.
+`llvm-gsymutil`. To use the API, start with
+[symbolication](crate::docs::symbolication) instead.
 
 ## What GSYM stores
 

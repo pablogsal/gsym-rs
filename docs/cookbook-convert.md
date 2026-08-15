@@ -24,9 +24,8 @@ image's executable sections, and an empty
 [`WriterOptions::build_id`](crate::WriterOptions) is filled in from the image's
 GNU build ID.
 
-The input must contain symbols or DWARF. GSYM cannot reconstruct source
-locations that were stripped before conversion; it can only re-encode what is
-present.
+Conversion re-encodes what the inputs already carry, so a stripped binary needs
+a companion debug file to produce anything useful.
 
 ## Companion file discovery
 
@@ -190,8 +189,6 @@ loaded a binary linked from it.
 
 ## Further reading
 
-Elsewhere in these docs:
-
 - [Format](crate::docs::format) for what conversion is writing into
 - [Symbolication](crate::docs::symbolication) for using the result at runtime
 
@@ -201,7 +198,7 @@ On the inputs, when a conversion produces less than expected:
   covers `.gnu_debuglink`, build-ID trees, and how `objcopy --only-keep-debug`
   splits a binary
 - [GDB: MiniDebugInfo](https://sourceware.org/gdb/current/onlinedocs/gdb.html/MiniDebugInfo.html)
-  covers what `.gnu_debugdata` does and does not contain
+  covers what `.gnu_debugdata` contains
 - [debuginfod](https://sourceware.org/elfutils/Debuginfod.html) documents
   `DEBUGINFOD_URLS`, `DEBUGINFOD_CACHE_PATH`, and the servers behind them
 - [Debug fission](https://gcc.gnu.org/wiki/DebugFission) and

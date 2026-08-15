@@ -6,9 +6,6 @@
 //! address index can be memory-mapped and queried without parsing the rest of
 //! the file.
 //!
-//! This crate implements the format directly. It does not link LLVM, call
-//! `llvm-gsymutil`, or depend on `BlazeSym`.
-//!
 //! # Quick start
 //!
 //! Build a file in memory and resolve an address:
@@ -89,10 +86,9 @@
 //!   Skipping that step is the usual cause of an empty or wrong result; see
 //!   [`docs::symbolication`].
 //!
-//! * Names and paths are bytes. The format stores raw bytes and this crate does
-//!   not reject non-UTF-8 data, so results are `&[u8]`. Use
-//!   `String::from_utf8_lossy` to display them, or `str::from_utf8` when
-//!   invalid data should be reported.
+//! * Names and paths are bytes. The format stores raw bytes and this crate
+//!   preserves them, so results are `&[u8]`. Use `String::from_utf8_lossy` to
+//!   display them, or `str::from_utf8` when invalid data should be reported.
 //!
 //! * Version 1 is the default and is what current tooling reads. Version 2
 //!   raises v1's 4 GiB offset limits and its 20-byte build-ID limit but needs
@@ -124,9 +120,8 @@
 //! I/O, and, with `convert`, ELF and DWARF diagnostics. It is
 //! `#[non_exhaustive]`, so a match on it needs a fallback arm.
 //!
-//! Malformed input produces an `Err` rather than a panic. Lookup validates only
-//! the records it reads, so a file of unknown provenance is worth one
-//! [`Gsym::verify`] at load time.
+//! Lookup validates only the records it reads, so an untrusted file is worth
+//! one [`Gsym::verify`] at load time.
 //!
 //! # Guides
 //!

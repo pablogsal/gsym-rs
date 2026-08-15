@@ -427,8 +427,8 @@ impl<D: AsRef<[u8]>> Gsym<D> {
     /// Checks that the address table is sorted, that every function record
     /// decodes, and that the strings, files, line programs, and inline ranges
     /// they reference are in bounds and well formed. Cost is proportional to the
-    /// file, so this belongs at load time for input of unknown provenance
-    /// rather than in front of each lookup.
+    /// file, so this belongs at load time for an untrusted file, not in front of
+    /// each lookup.
     ///
     /// # Errors
     ///

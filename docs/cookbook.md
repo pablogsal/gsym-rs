@@ -1,21 +1,18 @@
 # Cookbook
 
-Worked examples for each part of the public API, in the order they usually come
-up: the semantic model, building, reading, looking up, and rewriting.
-
-Feature-gated APIs are documented separately: the `docs::conversion` page for
-`convert`, and `MappedGsym` for `mmap`.
+Worked examples for each part of the public API. Feature-gated APIs have their
+own pages: `docs::conversion` for `convert`, and `MappedGsym` for `mmap`.
 
 GSYM stores names and paths as bytes, so the examples use byte strings
-throughout and preserve non-UTF-8 data.
+throughout.
 
 ## The semantic model
 
 [`Function`](crate::Function) and its parts are plain owned data with public
-fields. Construct them any way you like and hand them to a builder. Two
-newtypes keep unrelated integers apart: [`FileIndex`](crate::FileIndex) is a
-file-table index, and [`CallSiteFlags`](crate::CallSiteFlags) is a flag set that
-keeps bits this crate does not recognize.
+fields: build them however you like and hand them to a builder. Two newtypes
+keep unrelated integers apart: [`FileIndex`](crate::FileIndex) is a file-table
+index, and [`CallSiteFlags`](crate::CallSiteFlags) is a flag set that keeps bits
+this crate does not recognize.
 
 ```rust
 use gsym::{
@@ -31,7 +28,7 @@ assert_eq!(range.size(), 0x20);
 assert!(range.contains(0x1010));
 assert!(range.contains_range(AddressRange::new(0x1004, 0x1008)));
 
-// File-table index zero is permanently reserved for the empty entry.
+// File-table index zero is reserved for the empty entry.
 let file_index = FileIndex::new(1);
 assert_eq!(file_index.get(), 1);
 assert_eq!(FileIndex::from(1_u32), file_index);
@@ -53,7 +50,7 @@ let inline = InlineNode {
     children: Vec::new(),
 };
 
-// Unknown flag bits round-trip rather than being dropped.
+// Unknown flag bits round-trip.
 let mut flags = CallSiteFlags::INTERNAL | CallSiteFlags::EXTERNAL;
 assert!(flags.contains(CallSiteFlags::INTERNAL));
 assert_eq!(flags.bits(), 3);
@@ -276,7 +273,7 @@ let lean = reader
 assert_eq!(lean.frames()[0].line, 0);
 assert!(lean.call_site_patterns().is_empty());
 
-// No allocation at all: frames are handed to a closure, scratch is reused.
+// No allocation: frames go to a closure and scratch is reused.
 let mut visited = 0;
 let found = reader.for_each_frame(
     0x4004,
