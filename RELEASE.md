@@ -10,7 +10,7 @@ from GitHub Actions; do not create or push the tag manually.
 - crates.io trusted publishing names `pablogsal/gsym-rs`, `release.yml`, and
   the `release` environment.
 - GitHub release immutability is enabled for the repository.
-- The `CI complete` check is required on `main`.
+- The `Checks complete` check is required on `main`.
 
 ## Prepare
 

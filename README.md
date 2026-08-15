@@ -3,7 +3,7 @@
   Pure-Rust reading, writing, and Linux ELF/DWARF conversion for
   <a href="https://llvm.org/doxygen/dir_11913c55ade52754878c574ae3024754.html">LLVM GSYM</a>.<br>
   <a href="https://pablogsal.com/gsym-rs/"><strong>Documentation</strong></a><br><br>
-  <a href="https://github.com/pablogsal/gsym-rs/actions/workflows/ci.yml"><img src="https://github.com/pablogsal/gsym-rs/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/pablogsal/gsym-rs/actions/workflows/ci.yml"><img src="https://github.com/pablogsal/gsym-rs/actions/workflows/ci.yml/badge.svg?branch=main" alt="Checks"></a>
   <a href="https://app.codecov.io/github/pablogsal/gsym-rs"><img src="https://codecov.io/gh/pablogsal/gsym-rs/graph/badge.svg?branch=main" alt="Coverage"></a>
   <a href="https://app.codspeed.io/pablogsal/gsym-rs"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json" alt="CodSpeed"></a>
   <a href="https://crates.io/crates/gsym-rs"><img src="https://img.shields.io/crates/v/gsym-rs.svg" alt="crates.io"></a>
