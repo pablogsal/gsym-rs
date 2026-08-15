@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/pablogsal/gsym-rs/main/assets/mascot-compact.png" alt="gsym-rs detective crab mascot" width="210"><br>
+  <img src="https://raw.githubusercontent.com/pablogsal/gsym-rs/main/assets/mascot-compact.png" alt="gsym-rs detective crab mascot" width="325"><br>
   Pure-Rust reading, writing, and Linux ELF/DWARF conversion for
   <a href="https://llvm.org/doxygen/dir_11913c55ade52754878c574ae3024754.html">LLVM GSYM</a>.<br>
   <a href="https://pablogsal.com/gsym-rs/"><strong>Documentation</strong></a>
