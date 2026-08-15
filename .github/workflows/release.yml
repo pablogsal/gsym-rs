@@ -340,6 +340,11 @@ jobs:
             --title "gsym-rs $VERSION" \
             --notes-file release-notes.md \
             release-assets/*
+          immutable=$(gh release view "$RELEASE_TAG" --json isImmutable --jq .isImmutable)
+          if [[ "$immutable" != true ]]; then
+            echo "published release is not immutable" >&2
+            exit 1
+          fi
 
       - name: Verify the published release
         env:
