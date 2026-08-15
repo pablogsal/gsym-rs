@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -13,7 +14,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_common import CRATE, make_fail, sbom_name, write_checksum  # noqa: E402
 
 MAX_ATTESTATION_SIZE = 16 * 1024 * 1024
+RELEASE_URL = "https://github.com/pablogsal/gsym-rs/releases/download"
 fail = make_fail("release SBOM failure")
+
+
+def serial_number(version: str, target: str) -> str:
+    """Return the stable CycloneDX document identifier for one release target."""
+
+    subject = f"{RELEASE_URL}/v{version}/{sbom_name(version, target)}"
+    return f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, subject)}"
+
+
+def prepare(document: dict, version: str, target: str) -> None:
+    """Normalize and validate one CycloneDX document in place."""
+
+    normalize_local_references(document)
+    document["serialNumber"] = serial_number(version, target)
+    validate(document, version, target)
 
 
 def components(document: dict) -> list[dict]:
@@ -87,8 +104,8 @@ def validate(document: dict, version: str, target: str) -> None:
         fail("bomFormat is not CycloneDX")
     if document.get("specVersion") != "1.5" or document.get("version") != 1:
         fail("the SBOM must use CycloneDX 1.5 document version 1")
-    if "serialNumber" in document:
-        fail("the reproducible SBOM must not contain a random serial number")
+    if document.get("serialNumber") != serial_number(version, target):
+        fail("serialNumber is not the deterministic release identifier")
 
     metadata = document.get("metadata")
     root = metadata.get("component")
@@ -162,8 +179,7 @@ def main() -> None:
         fail(f"cannot read the SBOM: {error}")
     if not isinstance(document, dict):
         fail("the SBOM root is not an object")
-    normalize_local_references(document)
-    validate(document, arguments.version, arguments.target)
+    prepare(document, arguments.version, arguments.target)
 
     arguments.output.mkdir(parents=True, exist_ok=True)
     destination = arguments.output / sbom_name(arguments.version, arguments.target)

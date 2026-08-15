@@ -94,10 +94,13 @@ jobs:
   trusted-publishing:
     name: Check crates.io trusted publishing
     needs: plan
-    # Minting a token proves that crates.io trusts this repository, workflow,
-    # and environment before anything irreversible happens. Only dispatched
-    # runs can enter the release environment, so rehearsal branches skip this.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish-crate }}
+    # A rehearsal mints a token to prove that crates.io still trusts this
+    # repository, workflow, and environment. A real release authenticates in
+    # the publish job instead, keeping the protected approval to one prompt.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+      && needs.plan.outputs.tag == 'dry-run'
+      && inputs.publish-crate }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: release
@@ -302,7 +305,7 @@ jobs:
 
   publish-crates-io:
     name: Publish to crates.io
-    needs: [plan, assemble, trusted-publishing]
+    needs: [plan, assemble]
     if: ${{ needs.plan.outputs.tag != 'dry-run' && inputs.publish-crate }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -333,16 +336,13 @@ jobs:
 
   release-gate:
     name: Revalidate the release payload
-    needs: [plan, assemble, trusted-publishing, publish-crates-io]
+    needs: [plan, assemble, publish-crates-io]
     if: >-
       ${{ !cancelled()
-      && needs.plan.outputs.tag != 'dry-run'
       && needs.assemble.result == 'success'
-      && needs.trusted-publishing.result != 'failure'
       && needs.publish-crates-io.result != 'failure' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment: release
     permissions:
       contents: read
     steps:
@@ -413,11 +413,11 @@ jobs:
     needs: [plan, release-gate, attest]
     if: >-
       ${{ !cancelled()
+      && needs.plan.outputs.tag != 'dry-run'
       && needs.release-gate.result == 'success'
       && needs.attest.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment: release
     permissions:
       contents: write # Required only here, to create the tag and the release.
     steps:

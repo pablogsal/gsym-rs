@@ -81,6 +81,9 @@ jobs:
       - name: Check the fuzz targets
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
+      - name: Test the release tooling
+        run: python3 -m unittest discover --start-directory scripts/tests
+
       - name: Build the documentation
         env:
           RUSTDOCFLAGS: -D warnings

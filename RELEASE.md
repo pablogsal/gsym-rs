@@ -35,8 +35,9 @@ from GitHub Actions; do not create or push the tag manually.
 Dispatch **Actions > Release > Run workflow** from `main` with `dry-run` as
 the tag. The rehearsal builds and executes every Linux archive, verifies GNU
 and musl linkage on native x86-64 and AArch64 runners, generates and validates
-the CycloneDX SBOM, checks the complete payload, and confirms trusted
-publishing. It does not publish the crate or create a tag or release.
+the CycloneDX SBOM, attests every archive, checks the complete payload, and
+confirms trusted publishing. It does not publish the crate or create a tag or
+release.
 
 The expected targets and assets come from one release plan:
 
