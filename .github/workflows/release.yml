@@ -380,6 +380,10 @@ jobs:
   attest:
     name: Attest ${{ matrix.target }}
     needs: [plan, release-gate]
+    if: >-
+      ${{ !cancelled()
+      && needs.plan.result == 'success'
+      && needs.release-gate.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
