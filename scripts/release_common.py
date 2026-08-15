@@ -101,8 +101,12 @@ def archive_name(version: str, target: str) -> str:
     return f"{BINARY}-{version}-{target}.tar.gz"
 
 
-def checksum_name(archive: str) -> str:
-    return f"{archive}.sha256"
+def checksum_name(subject: str) -> str:
+    return f"{subject}.sha256"
+
+
+def sbom_name(version: str, target: str) -> str:
+    return f"{BINARY}-{version}-{target}.cdx.json"
 
 
 def expected_assets(version: str) -> list[str]:
@@ -110,8 +114,11 @@ def expected_assets(version: str) -> list[str]:
 
     assets = ["SHA256SUMS"]
     for target in TARGET_NAMES:
-        name = archive_name(version, target)
-        assets.extend((name, checksum_name(name)))
+        archive = archive_name(version, target)
+        sbom = sbom_name(version, target)
+        assets.extend(
+            (archive, checksum_name(archive), sbom, checksum_name(sbom))
+        )
     return sorted(assets)
 
 
@@ -123,25 +130,25 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_checksum(archive: Path) -> str:
-    """Write the sidecar next to an archive, in sha256sum's own format."""
+def write_checksum(subject: Path) -> str:
+    """Write a sha256sum-compatible sidecar next to a release subject."""
 
-    digest = sha256(archive)
-    archive.with_name(checksum_name(archive.name)).write_text(
-        f"{digest}  {archive.name}\n"
+    digest = sha256(subject)
+    subject.with_name(checksum_name(subject.name)).write_text(
+        f"{digest}  {subject.name}\n"
     )
     return digest
 
 
-def verify_checksum(archive: Path) -> str:
-    """Return an archive's digest, aborting if its sidecar disagrees."""
+def verify_checksum(subject: Path) -> str:
+    """Return a subject's digest, aborting if its sidecar disagrees."""
 
-    sidecar = archive.with_name(checksum_name(archive.name))
+    sidecar = subject.with_name(checksum_name(subject.name))
     if not sidecar.is_file():
-        _fail(f"missing checksum sidecar for {archive.name}")
-    digest = sha256(archive)
+        _fail(f"missing checksum sidecar for {subject.name}")
+    digest = sha256(subject)
     if sidecar.read_text().split()[0] != digest:
-        _fail(f"checksum sidecar does not match {archive.name}")
+        _fail(f"checksum sidecar does not match {subject.name}")
     return digest
 
 

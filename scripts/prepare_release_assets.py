@@ -16,6 +16,7 @@ from release_common import (  # noqa: E402
     checksum_name,
     expected_assets,
     make_fail,
+    sbom_name,
     verify_checksum,
 )
 
@@ -55,6 +56,12 @@ def main() -> None:
                 fail(f"no {wanted} among the built artifacts")
             shutil.copy2(available[wanted], arguments.output / wanted)
         checksums[name] = verify_checksum(arguments.output / name)
+        sbom = sbom_name(arguments.version, target)
+        for wanted in (sbom, checksum_name(sbom)):
+            if wanted not in available:
+                fail(f"no {wanted} among the built artifacts")
+            shutil.copy2(available[wanted], arguments.output / wanted)
+        checksums[sbom] = verify_checksum(arguments.output / sbom)
 
     unified = "".join(f"{digest}  {name}\n" for name, digest in sorted(checksums.items()))
     (arguments.output / "SHA256SUMS").write_text(unified)
