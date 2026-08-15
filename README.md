@@ -89,6 +89,14 @@ gsymtool segment ./app-v2.gsym -o ./app-shard.gsym --size 64MiB
 `lookup` accepts the unslid virtual addresses stored in the ELF image. Subtract
 the load bias from runtime addresses in PIE executables and shared libraries.
 
+## Performance
+
+![ELF and DWARF conversion throughput](https://raw.githubusercontent.com/pablogsal/gsym-rs/main/assets/benchmarks/conversion.svg)
+
+![Initialized GSYM lookup throughput](https://raw.githubusercontent.com/pablogsal/gsym-rs/main/assets/benchmarks/lookup.svg)
+
+![Peak resident memory during conversion](https://raw.githubusercontent.com/pablogsal/gsym-rs/main/assets/benchmarks/memory.svg)
+
 ## Support
 
 | Input or format | Support |

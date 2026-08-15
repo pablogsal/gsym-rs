@@ -1,0 +1,73 @@
+{
+  "bootstrap_resamples": 50000,
+  "compiler": "x86_64-linux-gnu-gcc-15 (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+  "confidence_interval": "95% percentile bootstrap of the median",
+  "conversion_policy": "fresh output, discovery disabled, call sites disabled, LLVM one thread",
+  "cpu": {
+    "energy_performance_preference": "performance",
+    "logical_cpus": 32,
+    "model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "pinned_cpu": 15,
+    "scaling_governor": "performance"
+  },
+  "estimator": "median",
+  "function_counts": [
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    16384,
+    32768
+  ],
+  "gsymtool": "gsymtool 0.1.1",
+  "hot_lookup_policy": "internally timed initialized readers; parsing, startup, and address loading excluded",
+  "hot_lookups_per_trial": 1000000,
+  "hot_trials": 25,
+  "hot_warmups": 5,
+  "llvm_gsymutil": "/home/pablogsal/dsym-rs-research/llvm-build-gsym/bin/llvm-gsymutil\nLLVM (http://llvm.org/):\n  LLVM version 24.0.0git\n  Optimized build.",
+  "llvm_source_commit": "b8afe9fdd012f12df6155dfbf3222b13310e43ac",
+  "llvm_source_commit_date": "2026-08-15T19:11:17-04:00",
+  "llvm_source_url": "https://github.com/llvm/llvm-project/commit/b8afe9fdd012f12df6155dfbf3222b13310e43ac",
+  "load_average_after": [
+    2.806640625,
+    5.73779296875,
+    6.34765625
+  ],
+  "load_average_before": [
+    4.3544921875,
+    8.875,
+    7.2666015625
+  ],
+  "lookup_batches": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    16384,
+    32768
+  ],
+  "lookup_policy": "same LLVM-generated GSYM, warm page cache, stdout discarded",
+  "platform": "Linux-7.0.0-29-generic-x86_64-with-glibc2.43",
+  "python": "3.14.4",
+  "random_seed": 1196644685,
+  "resource_policy": "independent Linux wait4 child rusage; CPU=user+system; RSS=ru_maxrss",
+  "resource_trials": 15,
+  "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)\nbinary: rustc\ncommit-hash: 2d8144b7880597b6e6d3dfd63a9a9efae3f533d3\ncommit-date: 2026-07-07\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.0\nLLVM version: 22.1.6",
+  "timestamp_utc": "20260815T231819Z",
+  "trials": 40,
+  "warmups": 8
+}
