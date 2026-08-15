@@ -1,0 +1,42 @@
+version: 2
+
+updates:
+  # Actions are pinned to commit digests; Dependabot rewrites both the digest
+  # and the version comment when a new release appears.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "deps"
+    groups:
+      cargo:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "deps"
+    groups:
+      fuzz:
+        patterns:
+          - "*"
