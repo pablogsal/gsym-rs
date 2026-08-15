@@ -44,7 +44,7 @@ zerocopy = "0.8.56"
 debuginfod-client = { package = "debuginfod", version = "0.3", optional = true, default-features = false, features = ["reqwest"] }
 
 [dev-dependencies]
-criterion = { version = "0.7", features = ["html_reports"] }
+criterion = { package = "codspeed-criterion-compat", version = "5.0.1", features = ["html_reports"] }
 proptest = "1.7"
 tempfile = "3.20"
 
@@ -56,6 +56,9 @@ harness = false
 codegen-units = 1
 lto = "thin"
 strip = "symbols"
+
+[profile.bench]
+strip = "none"
 
 [lints]
 workspace = true

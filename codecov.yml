@@ -1,0 +1,27 @@
+coverage:
+  precision: 2
+  round: down
+  range: 70...100
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 0.5%
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+
+comment:
+  layout: reach,diff,flags,tree
+  behavior: default
+  require_changes: true
+
+github_checks:
+  annotations: true
+
+ignore:
+  - benches/**
+  - examples/**
+  - fuzz/**
+  - tests/**

@@ -4,4 +4,6 @@
 /fuzz/corpus/
 /fuzz/coverage/
 /benchmark-results/
+/default_*.profraw
+/lcov.info
 __pycache__/
