@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use crate::endian::{Cursor, Encoder, Endian};
 use crate::error::{Error, Result};
@@ -48,15 +49,7 @@ fn parse(
 ) -> Result<()> {
     let minimum_delta = read_sleb(cursor)?;
     let maximum_delta = read_sleb(cursor)?;
-    if maximum_delta < minimum_delta {
-        return Err(Error::InvalidFormat(
-            "line-table maximum delta precedes minimum delta",
-        ));
-    }
-    let line_range = maximum_delta
-        .checked_sub(minimum_delta)
-        .and_then(|delta| delta.checked_add(1))
-        .ok_or(Error::Overflow("line-table delta range"))?;
+    let line_range = special_line_range(minimum_delta, maximum_delta)?;
     let first_line = read_uleb(cursor)?;
     let mut row = LineEntry {
         address: base,
@@ -99,12 +92,11 @@ fn parse(
                 row.line = add_line_delta(row.line, read_sleb(cursor)?)?;
             }
             special => {
-                let adjusted = i64::from(special.saturating_sub(FIRST_SPECIAL));
+                let adjusted = u64::from(special.saturating_sub(FIRST_SPECIAL));
                 let line_delta = minimum_delta
-                    .checked_add(adjusted.checked_rem(line_range).unwrap_or(0))
+                    .checked_add_unsigned(adjusted % line_range)
                     .ok_or(Error::Overflow("line-table line delta"))?;
-                let address_delta = u64::try_from(adjusted.checked_div(line_range).unwrap_or(0))
-                    .map_err(|_| Error::InvalidFormat("negative line-table address delta"))?;
+                let address_delta = adjusted / line_range;
                 row.line = add_line_delta(row.line, line_delta)?;
                 row.address = row
                     .address
@@ -116,6 +108,18 @@ fn parse(
             }
         }
     }
+}
+
+fn special_line_range(minimum: i64, maximum: i64) -> Result<NonZeroU64> {
+    if maximum < minimum {
+        return Err(Error::InvalidFormat(
+            "line-table maximum delta precedes minimum delta",
+        ));
+    }
+    let span = maximum
+        .checked_sub(minimum)
+        .ok_or(Error::Overflow("line-table delta range"))?;
+    Ok(NonZeroU64::MIN.saturating_add(span.unsigned_abs()))
 }
 
 fn add_line_delta(line: u32, delta: i64) -> Result<u32> {
@@ -253,65 +257,4 @@ fn encode_special(
         .saturating_add(i128::from(address_delta).saturating_mul(i128::from(line_range)));
     let opcode = adjusted.saturating_add(i128::from(FIRST_SPECIAL));
     u8::try_from(opcode).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::endian::Endian;
-    use crate::model::LineEntry;
-
-    use super::{decode, encode, lookup};
-
-    #[test]
-    fn round_trip_and_lookup() {
-        let lines = vec![
-            LineEntry {
-                address: 0x1000,
-                file: 1.into(),
-                line: 10,
-            },
-            LineEntry {
-                address: 0x1004,
-                file: 2.into(),
-                line: 11,
-            },
-            LineEntry {
-                address: 0x1020,
-                file: 2.into(),
-                line: 7,
-            },
-        ];
-        let bytes = encode(&lines, Endian::Little, 0x1000).unwrap();
-        assert_eq!(decode(&bytes, Endian::Big, 0x1000).unwrap(), lines);
-        assert_eq!(
-            lookup(&bytes, Endian::Little, 0x1000, 0x1003).unwrap(),
-            lines.first().copied()
-        );
-        assert_eq!(
-            lookup(&bytes, Endian::Little, 0x1000, 0x1010).unwrap(),
-            lines.get(1).copied()
-        );
-        assert_eq!(
-            lookup(&bytes, Endian::Little, 0x1000, 0x0fff).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn rejects_bad_programs() {
-        assert!(decode(&[0, 0, 1], Endian::Little, 0).is_err());
-        let descending = [
-            LineEntry {
-                address: 10,
-                file: 1.into(),
-                line: 1,
-            },
-            LineEntry {
-                address: 9,
-                file: 1.into(),
-                line: 2,
-            },
-        ];
-        assert!(encode(&descending, Endian::Little, 0).is_err());
-    }
 }

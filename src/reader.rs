@@ -157,7 +157,7 @@ pub struct VerifyReport {
     pub functions: usize,
     /// Number of file-table entries verified.
     pub files: usize,
-    /// Number of strings checked.
+    /// Number of NUL-terminated strings stored in the string table.
     pub strings: usize,
     /// Total `FunctionInfo` section size in bytes.
     pub function_info_bytes: usize,
@@ -336,11 +336,7 @@ impl<D: AsRef<[u8]>> Gsym<D> {
             name: self.string(raw.name)?,
             all_data: self.data.as_ref(),
             raw,
-            endian: self.layout.endian,
-            string_offset_size: self.layout.string_offset_size,
-            string_table: self.layout.string_table.clone(),
-            file_table: self.layout.file_table.clone(),
-            file_count: self.layout.file_count,
+            layout: &self.layout,
         }))
     }
 
@@ -480,6 +476,12 @@ impl<D: AsRef<[u8]>> Gsym<D> {
                 "GSYM string table does not begin with an empty string",
             ));
         }
+        if self.layout.file_count > 0 {
+            let (directory, basename) = self.file(0_u32)?;
+            if !directory.is_empty() || !basename.is_empty() {
+                return Err(Error::InvalidFormat("file-table index zero must be empty"));
+            }
+        }
         let mut previous = None;
         for index in 0..self.layout.address_count as usize {
             let address = self.address(index)?;
@@ -489,7 +491,7 @@ impl<D: AsRef<[u8]>> Gsym<D> {
             previous = Some(address);
             let function = self.function(index)?;
             let decoded = function.decode_encoded()?;
-            owned::validate(self, &decoded)?;
+            owned::validate(&function, &decoded)?;
             visitor(&function, decoded)?;
         }
         for index in 0..self.layout.file_count {
@@ -565,8 +567,6 @@ impl<D: AsRef<[u8]>> Gsym<D> {
             return Ok(None);
         }
         let count = self.layout.address_count as usize;
-        // An entry that would overflow `base + entry` also exceeds
-        // `address - base`, so comparing relative addresses preserves order.
         let relative = address.saturating_sub(self.layout.base_address);
         let entries = self
             .data
@@ -629,24 +629,8 @@ fn partition_point<const N: usize>(
     probe: u64,
     decode: impl Fn([u8; N]) -> u64,
 ) -> usize {
-    let mut low = 0usize;
-    let mut high = entries.len().checked_div(N).unwrap_or(0);
-    while low < high {
-        let middle = low.saturating_add(high.saturating_sub(low) / 2);
-        let start = middle.saturating_mul(N);
-        // The caller supplies exactly `count * N` bytes, so a missing chunk is
-        // unreachable.
-        let value = entries
-            .get(start..)
-            .and_then(<[u8]>::first_chunk::<N>)
-            .map_or(u64::MAX, |entry| decode(*entry));
-        if value <= probe {
-            low = middle.saturating_add(1);
-        } else {
-            high = middle;
-        }
-    }
-    low
+    let (chunks, _) = entries.as_chunks::<N>();
+    chunks.partition_point(|entry| decode(*entry) <= probe)
 }
 
 #[inline]
@@ -662,5 +646,83 @@ where
 impl<D: AsRef<[u8]>> AsRef<[u8]> for Gsym<D> {
     fn as_ref(&self) -> &[u8] {
         self.data.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::{AddressRange, FileEntry, Function, InlineNode};
+    use crate::{Error, GsymBuilder};
+
+    use super::Gsym;
+
+    #[test]
+    fn verification_rejects_a_non_empty_reserved_file_entry() {
+        let mut builder = GsymBuilder::new();
+        let _ = builder.add_file(FileEntry::new("/src", "main.c")).unwrap();
+        builder
+            .add_function(Function::new(AddressRange::new(0x1000, 0x1010), b"main"))
+            .unwrap();
+        let mut bytes = builder.to_bytes().unwrap();
+
+        let table = Gsym::parse(bytes.as_slice()).unwrap().layout.file_table;
+        let reserved = table.start.saturating_add(4);
+        let first = reserved.saturating_add(8);
+        bytes.copy_within(first..first.saturating_add(8), reserved);
+
+        assert!(matches!(
+            Gsym::parse(bytes.as_slice()).unwrap().verify(),
+            Err(Error::InvalidFormat("file-table index zero must be empty"))
+        ));
+    }
+
+    #[test]
+    fn verification_counts_stored_strings() {
+        let mut builder = GsymBuilder::new();
+        let _ = builder.add_file(FileEntry::new("/src", "main.c")).unwrap();
+        builder
+            .add_function(Function::new(AddressRange::new(0x1000, 0x1010), b"main"))
+            .unwrap();
+        builder
+            .add_function(Function::new(AddressRange::new(0x2000, 0x2010), b"helper"))
+            .unwrap();
+        let bytes = builder.to_bytes().unwrap();
+
+        let report = Gsym::parse(bytes.as_slice()).unwrap().verify().unwrap();
+        assert_eq!(report.functions, 2);
+        assert_eq!(report.files, 2);
+        assert_eq!(report.strings, 5);
+    }
+
+    #[test]
+    fn verification_and_owned_decode_reject_a_missing_inline_file() {
+        let range = AddressRange::new(0x1000, 0x1010);
+        let mut builder = GsymBuilder::new();
+        builder
+            .add_function(Function {
+                inline: Some(InlineNode {
+                    ranges: vec![range],
+                    name: b"inlined".to_vec(),
+                    call_file: 0_u32.into(),
+                    ..InlineNode::default()
+                }),
+                ..Function::new(range, b"outer")
+            })
+            .unwrap();
+        let mut bytes = builder.to_bytes().unwrap();
+        let function_offset = Gsym::parse(bytes.as_slice())
+            .unwrap()
+            .function_offset(0)
+            .unwrap();
+        let inline_payload = function_offset.saturating_add(16);
+        let call_file = inline_payload.saturating_add(8);
+        let Some(slot) = bytes.get_mut(call_file) else {
+            panic!("writer omitted the inline call-file field");
+        };
+        *slot = 2;
+
+        let gsym = Gsym::parse(bytes.as_slice()).unwrap();
+        assert!(gsym.verify().is_err());
+        assert!(gsym.function(0).unwrap().decode().is_err());
     }
 }

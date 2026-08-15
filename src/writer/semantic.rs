@@ -1,7 +1,9 @@
 use hashbrown::HashTable;
 
 use crate::Result;
-use crate::format::function::{EncodedCallSite, EncodedFunction, EncodedInlineNode};
+use crate::format::function::{
+    EncodedCallSite, EncodedFunction, EncodedInlineNode, check_merged_depth,
+};
 use crate::model::{FileEntry, Function, InlineNode};
 
 const AVERAGE_STRING_LEN: usize = 24;
@@ -107,6 +109,15 @@ pub(super) fn encode_function(
     function: Function,
     strings: &mut StringTable,
 ) -> Result<EncodedFunction> {
+    encode_function_at(function, strings, 0)
+}
+
+fn encode_function_at(
+    function: Function,
+    strings: &mut StringTable,
+    depth: usize,
+) -> Result<EncodedFunction> {
+    check_merged_depth(depth)?;
     let name = strings.intern(&function.name);
     let lines = (!function.lines.is_empty()).then_some(function.lines);
     let inline = function
@@ -115,7 +126,7 @@ pub(super) fn encode_function(
         .transpose()?;
     let mut merged = Vec::with_capacity(function.merged.len());
     for entry in function.merged {
-        merged.push(encode_function(entry, strings)?);
+        merged.push(encode_function_at(entry, strings, depth.saturating_add(1))?);
     }
     let mut call_sites = Vec::with_capacity(function.call_sites.len());
     for call_site in function.call_sites {

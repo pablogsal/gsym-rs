@@ -3,16 +3,17 @@ mod image;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use object::Object;
 
 use self::discovery::{
-    Discovery, discover_dwp, discover_separate_debug, discover_supplementary,
+    Discovery, DiscoveryCache, discover_dwp, discover_separate_debug, discover_supplementary,
     validated_gnu_debugdata,
 };
 pub(in crate::convert) use self::image::AddressLayout;
 use self::image::{
-    cross_check_elf_architecture, cross_check_elf_identity, import_symbols, malformed, parse_elf,
+    cross_check_elf_architecture, cross_check_elf_identity, malformed, parse_elf,
     require_supported_kind,
 };
 use super::ConversionWarning;
@@ -44,7 +45,8 @@ pub struct ElfInputs<'data> {
     pub image: &'data [u8],
     /// Explicit separate DWARF ELF, if different from the image.
     pub debug: Option<&'data [u8]>,
-    /// Extra symbol-table ELF read alongside the image's own tables.
+    /// Extra symbol-table ELF read alongside the image's and debug input's own
+    /// tables.
     pub symbols: Option<&'data [u8]>,
     /// Supplementary DWARF ELF referenced by the main debug input.
     pub supplementary: Option<&'data [u8]>,
@@ -85,9 +87,7 @@ impl<'data> ElfInputs<'data> {
         self
     }
 
-    /// Uses an explicit ELF symbol table instead of the selected debug input.
-    ///
-    /// The image's own tables are read either way.
+    /// Adds an explicit ELF symbol table to the ones already imported.
     #[must_use]
     pub const fn with_symbols(mut self, symbols: &'data [u8]) -> Self {
         self.symbols = Some(symbols);
@@ -188,6 +188,26 @@ pub enum DiscoveryPolicy {
     Enabled,
 }
 
+/// A potentially slow operation reported during path-based debug discovery.
+///
+/// Pass an observer to [`ElfConverter::convert_path_with_observer`] to surface
+/// network activity in interactive tools.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DiscoveryEvent<'path> {
+    /// A debuginfod request is about to be issued.
+    DebuginfodRequest {
+        /// Kind of companion being requested, such as `debug file`.
+        artifact: &'static str,
+        /// Hexadecimal ELF build ID.
+        build_id: &'path str,
+        /// Debuginfod server base URL.
+        endpoint: &'path str,
+        /// Image or debug file whose companion is being requested.
+        related_path: &'path Path,
+    },
+}
+
 impl Default for ConversionOptions {
     fn default() -> Self {
         Self {
@@ -219,7 +239,7 @@ impl Default for ConversionOptions {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct ConversionStats {
-    /// Functions imported from ELF symbol tables.
+    /// Distinct functions imported from ELF symbol tables.
     pub symbol_functions: usize,
     /// Functions imported from DWARF DIEs.
     pub dwarf_functions: usize,
@@ -286,16 +306,28 @@ impl fmt::Debug for ConversionReport {
 /// report.builder.write_to(std::fs::File::create("app.gsym")?)?;
 /// # Ok::<(), gsym::Error>(())
 /// ```
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct ElfConverter {
     options: ConversionOptions,
+    discovery_cache: OnceLock<Arc<DiscoveryCache>>,
 }
+
+impl PartialEq for ElfConverter {
+    fn eq(&self, other: &Self) -> bool {
+        self.options == other.options
+    }
+}
+
+impl Eq for ElfConverter {}
 
 impl ElfConverter {
     /// Creates a converter using `options`.
     #[must_use]
     pub const fn new(options: ConversionOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            discovery_cache: OnceLock::new(),
+        }
     }
 
     /// Returns this converter's immutable options.
@@ -383,32 +415,32 @@ impl ElfConverter {
         let mut builder = GsymBuilder::with_options(BuilderOptions {
             writer,
             executable_ranges: layout.ranges.clone().into_boxed_slice(),
-            repair_zero_sized_functions: true,
-            merge_equal_address_functions: false,
+            ..BuilderOptions::default()
         });
         let mut stats = ConversionStats::default();
 
         if self.options.include_symbols {
-            let mut imported = 0_usize;
-            if let Some(symbol_bytes) = inputs.symbols {
-                let symbol_file = parse_elf(symbol_bytes, ElfInputKind::Symbols)?;
-                cross_check_elf_identity(&image, &symbol_file, ElfInputKind::Symbols)?;
-                imported = import_symbols(
-                    &symbol_file,
-                    &layout,
-                    &mut builder,
-                    &mut stats.rejected_ranges,
-                )?;
-            } else if separate_debug {
-                imported =
-                    import_symbols(&debug, &layout, &mut builder, &mut stats.rejected_ranges)?;
+            let symbol_file = inputs
+                .symbols
+                .map(|bytes| parse_elf(bytes, ElfInputKind::Symbols))
+                .transpose()?;
+            if let Some(symbol_file) = &symbol_file {
+                cross_check_elf_identity(&image, symbol_file, ElfInputKind::Symbols)?;
             }
-            stats.symbol_functions = imported.saturating_add(import_symbols(
-                &image,
+            let mut sources: Vec<(&[u8], &object::File<'_>)> = Vec::with_capacity(3);
+            if let (Some(bytes), Some(file)) = (inputs.symbols, symbol_file.as_ref()) {
+                sources.push((bytes, file));
+            }
+            if separate_debug {
+                sources.push((debug_bytes, &debug));
+            }
+            sources.push((inputs.image, &image));
+            stats.symbol_functions = import_distinct_symbols(
+                &sources,
                 &layout,
                 &mut builder,
                 &mut stats.rejected_ranges,
-            )?);
+            )?;
         }
         if let Some(dwarf_options) = self.options.dwarf {
             super::dwarf::import_dwarf(super::dwarf::DwarfImport {
@@ -451,10 +483,34 @@ impl ElfConverter {
     ///
     /// Returns an error when an input cannot be read or converted.
     pub fn convert_path(&self, image_path: impl AsRef<Path>) -> Result<ConversionReport> {
+        self.convert_path_with_observer(image_path, |_| {})
+    }
+
+    /// Converts an ELF path while reporting potentially slow discovery work.
+    ///
+    /// The observer is called immediately before each debuginfod request. It
+    /// may be called more than once when several servers or companions are
+    /// considered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an input cannot be read or converted.
+    pub fn convert_path_with_observer(
+        &self,
+        image_path: impl AsRef<Path>,
+        mut observer: impl FnMut(DiscoveryEvent<'_>),
+    ) -> Result<ConversionReport> {
         let image_path = image_path.as_ref();
         let image_bytes = read_file(image_path, "read ELF image")?;
+        let discovery_cache = self.discovery_cache.get_or_init(Arc::default);
         let discovery = if self.options.discovery == DiscoveryPolicy::Enabled {
-            discover_separate_debug(image_path, &image_bytes, &self.options)?
+            discover_separate_debug(
+                image_path,
+                &image_bytes,
+                &self.options,
+                discovery_cache,
+                &mut observer,
+            )?
         } else {
             Discovery::default()
         };
@@ -466,8 +522,13 @@ impl ElfConverter {
             .artifact
             .as_ref()
             .map_or(image_bytes.as_slice(), |artifact| artifact.bytes.as_slice());
-        let supplementary_discovery =
-            discover_supplementary(debug_path, debug_source, &self.options)?;
+        let supplementary_discovery = discover_supplementary(
+            debug_path,
+            debug_source,
+            &self.options,
+            discovery_cache,
+            &mut observer,
+        )?;
         let dwp = (self.options.discovery == DiscoveryPolicy::Enabled)
             .then(|| discover_dwp(image_path, debug_path))
             .flatten();
@@ -502,6 +563,63 @@ impl ElfConverter {
         report.discovered_dwp = dwp.map(|artifact| artifact.path);
         Ok(report)
     }
+}
+
+fn import_distinct_symbols(
+    sources: &[(&[u8], &object::File<'_>)],
+    layout: &AddressLayout,
+    builder: &mut GsymBuilder,
+    rejected: &mut usize,
+) -> Result<usize> {
+    let mut visited: Vec<&[u8]> = Vec::with_capacity(sources.len());
+    let mut unique = Vec::with_capacity(sources.len());
+    for &(bytes, file) in sources {
+        if !visited.iter().any(|other| std::ptr::eq(*other, bytes)) {
+            visited.push(bytes);
+            unique.push(file);
+        }
+    }
+
+    if let [file] = unique.as_slice() {
+        let mut imported = 0_usize;
+        return image::visit_symbols(file, layout, |function, disposition| {
+            match disposition {
+                image::SymbolDisposition::Import => {
+                    builder.add_function(function)?;
+                    imported = imported.saturating_add(1);
+                }
+                image::SymbolDisposition::Reject => {
+                    *rejected = rejected.saturating_add(1);
+                }
+            }
+            Ok(())
+        })
+        .map(|()| imported);
+    }
+
+    let mut accepted = Vec::new();
+    let mut skipped = Vec::new();
+    for file in unique {
+        image::visit_symbols(file, layout, |function, disposition| {
+            match disposition {
+                image::SymbolDisposition::Import => accepted.push(function),
+                image::SymbolDisposition::Reject => skipped.push(function),
+            }
+            Ok(())
+        })?;
+    }
+    accepted.sort_unstable();
+    accepted.dedup();
+    skipped.sort_unstable();
+    skipped.dedup();
+    skipped.retain(|function| accepted.binary_search(function).is_err());
+
+    let imported = accepted.len();
+    *rejected = rejected.saturating_add(skipped.len());
+    for function in accepted {
+        builder.add_function(function)?;
+    }
+    Ok(imported)
 }
 
 fn read_file(path: &Path, description: &'static str) -> Result<Vec<u8>> {

@@ -6,6 +6,10 @@ mod bulk;
 mod cli;
 mod terminal;
 
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::borrow::Cow;
 use std::fmt;
 use std::io::{BufWriter, Write as _};
@@ -30,9 +34,10 @@ fn main() -> ExitCode {
     let Cli {
         color,
         quiet,
+        verbose,
         command,
     } = Cli::parse_styled();
-    let mut terminal = Terminal::new(color.into(), quiet);
+    let mut terminal = Terminal::new(color.into(), quiet, verbose);
     match run(command, &mut terminal) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -72,7 +77,12 @@ fn convert(arguments: ConvertArgs, terminal: &mut Terminal) -> Result<()> {
         sources,
         dwarf,
     } = arguments;
-    let converter = ElfConverter::new(conversion_options(version, &sources, &dwarf));
+    let converter = ElfConverter::new(conversion_options(
+        version,
+        &sources,
+        &dwarf,
+        output_dir.is_some(),
+    ));
     if let Some(directory) = output_dir {
         return bulk::run(
             &converter,
@@ -102,6 +112,7 @@ fn conversion_options(
     version: CliVersion,
     sources: &SourceToggles,
     dwarf: &DwarfToggles,
+    batch: bool,
 ) -> ConversionOptions {
     let mut options = ConversionOptions::default();
     options.writer.version = version.into();
@@ -110,8 +121,11 @@ fn conversion_options(
         inline_info: !dwarf.no_inline,
         call_sites: dwarf.call_sites,
     });
-    if sources.no_discovery {
+    if sources.discovery.no_discovery {
         options.discovery = DiscoveryPolicy::Disabled;
+        options.debuginfod_urls.clear();
+    } else if batch && !sources.discovery.debuginfod {
+        options.debuginfod_urls.clear();
     }
     options
 }
@@ -268,11 +282,7 @@ fn segment(arguments: &SegmentArgs, terminal: &mut Terminal) -> Result<()> {
     let decoded = Gsym::parse(&source)?.decode_all()?;
     let segments = decoded.segments(arguments.size.get(), options)?;
     for segment in &segments {
-        let path = PathBuf::from(format!(
-            "{}-{:#x}",
-            arguments.output.display(),
-            segment.first_address
-        ));
+        let path = shard_path(&arguments.output, segment.first_address);
         persist_bytes(&path, segment.bytes())?;
         terminal.success(format_args!(
             "wrote {} ({} functions, {})",
@@ -282,6 +292,12 @@ fn segment(arguments: &SegmentArgs, terminal: &mut Terminal) -> Result<()> {
         ))?;
     }
     Ok(())
+}
+
+fn shard_path(prefix: &Path, first_address: u64) -> PathBuf {
+    let mut name = prefix.as_os_str().to_os_string();
+    name.push(format!("-{first_address:#x}"));
+    PathBuf::from(name)
 }
 
 fn persist_builder(builder: GsymBuilder, path: &Path) -> Result<u64> {
@@ -455,16 +471,21 @@ struct SizeRatio {
     input: u64,
 }
 
+impl SizeRatio {
+    fn tenths(&self) -> Option<u128> {
+        let input = u128::from(self.input);
+        u128::from(self.output)
+            .checked_mul(1000)?
+            .checked_add(input.checked_div(2)?)?
+            .checked_div(input)
+    }
+}
+
 impl fmt::Display for SizeRatio {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.input == 0 {
+        let Some(tenths) = self.tenths() else {
             return formatter.write_str("unknown ratio");
-        }
-        let tenths = self
-            .output
-            .saturating_mul(1000)
-            .checked_div(self.input)
-            .unwrap_or(0);
+        };
         write!(
             formatter,
             "{}.{}% of input",
@@ -523,6 +544,67 @@ mod tests {
         assert_eq!(bytes(b"hello"), "hello");
         assert_eq!(bytes(&[0xff]), "\u{fffd}");
         assert_eq!(hex::encode([0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn size_ratio_rounds_to_the_nearest_tenth_without_saturating() {
+        assert_eq!(
+            SizeRatio {
+                output: 1999,
+                input: 10_000,
+            }
+            .to_string(),
+            "20.0% of input"
+        );
+        assert_eq!(
+            SizeRatio {
+                output: 1994,
+                input: 10_000,
+            }
+            .to_string(),
+            "19.9% of input"
+        );
+        assert_eq!(
+            SizeRatio {
+                output: 20_000_000_000_000_000,
+                input: 40_000_000_000_000_000,
+            }
+            .to_string(),
+            "50.0% of input"
+        );
+        assert_eq!(
+            SizeRatio {
+                output: u64::MAX,
+                input: u64::MAX,
+            }
+            .to_string(),
+            "100.0% of input"
+        );
+        assert_eq!(
+            SizeRatio {
+                output: 4096,
+                input: 0,
+            }
+            .to_string(),
+            "unknown ratio"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn segment_shard_paths_keep_every_prefix_byte() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let prefix = PathBuf::from(OsStr::from_bytes(b"out/sh\xffard.gsym"));
+        let path = shard_path(&prefix, 0x1000);
+        assert_eq!(path.as_os_str().as_bytes(), b"out/sh\xffard.gsym-0x1000");
+        assert_eq!(
+            shard_path(Path::new("app.gsym"), 0x40_1120)
+                .to_str()
+                .unwrap(),
+            "app.gsym-0x401120"
+        );
     }
 
     #[test]

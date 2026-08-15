@@ -88,8 +88,8 @@ consumes the builder.
 
 ```rust
 use gsym::{
-    AddressRange, BuilderOptions, Endian, FileEntry, Function, GsymBuilder,
-    GsymVersion, LineEntry, WriterOptions,
+    AddressRange, BuilderOptions, Endian, FileEntry, Function, FunctionSetPolicy,
+    GsymBuilder, GsymVersion, LineEntry, WriterOptions,
 };
 
 fn make_builder() -> gsym::Result<GsymBuilder> {
@@ -113,7 +113,7 @@ fn make_builder() -> gsym::Result<GsymBuilder> {
         .base_address(0x2000)
         .build_id([0xaa, 0xbb])
         .repair_zero_sized_functions(true)
-        .merge_equal_address_functions(false)
+        .function_set(FunctionSetPolicy::Deduplicate)
         .executable_ranges([AddressRange::new(0x2000, 0x3000)]);
 
     // Files are interned: adding the same entry twice returns the same index.
@@ -209,7 +209,7 @@ assert!(functions.next().is_none());
 let verified: gsym::VerifyReport = reader.verify()?;
 assert_eq!(verified.functions, 1);
 assert_eq!(verified.files, 1);
-assert!(verified.strings >= 2);
+assert_eq!(verified.strings, 2);
 assert!(verified.function_info_bytes > 0);
 
 let owned = Gsym::parse(bytes.clone())?;

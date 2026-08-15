@@ -1,7 +1,6 @@
+use crate::format::function::{check_inline_depth, check_merged_depth};
 use crate::model::{AddressRange, FileEntry, FileIndex, Function, InlineNode};
 use crate::{Error, Result};
-
-const MAX_INLINE_DEPTH: usize = 256;
 
 #[derive(Clone, Copy)]
 enum FileReferenceKind {
@@ -31,8 +30,9 @@ fn validate_function_tree(
     function: &Function,
     file_count: Option<usize>,
     merged_parent: Option<AddressRange>,
-    depth: usize,
+    merged_depth: usize,
 ) -> Result<()> {
+    check_merged_depth(merged_depth)?;
     if function.name.is_empty() {
         return Err(Error::InvalidModel("function name must not be empty"));
     }
@@ -60,7 +60,7 @@ fn validate_function_tree(
         validate_file_index(line.file, file_count, FileReferenceKind::Line)?;
     }
     if let Some(inline) = &function.inline {
-        validate_inline(inline, &[function.range], file_count, depth)?;
+        validate_inline(inline, &[function.range], file_count, 0)?;
     }
     let size = function.range.size();
     if function
@@ -73,7 +73,12 @@ fn validate_function_tree(
         ));
     }
     for merged in &function.merged {
-        validate_function_tree(merged, file_count, Some(function.range), depth)?;
+        validate_function_tree(
+            merged,
+            file_count,
+            Some(function.range),
+            merged_depth.saturating_add(1),
+        )?;
     }
     Ok(())
 }
@@ -84,13 +89,7 @@ fn validate_inline(
     file_count: Option<usize>,
     depth: usize,
 ) -> Result<()> {
-    if depth > MAX_INLINE_DEPTH {
-        return Err(Error::Limit {
-            context: "inline tree depth",
-            value: depth as u64,
-            limit: MAX_INLINE_DEPTH as u64,
-        });
-    }
+    check_inline_depth(depth)?;
     if node.ranges.is_empty() {
         return Err(Error::InvalidModel("inline node must contain a range"));
     }

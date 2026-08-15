@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::process::Command;
 
-use gsym::convert::{ConversionOptions, ConversionWarning, ElfConverter};
+use gsym::convert::{ConversionOptions, ConversionWarning, DiscoveryEvent, ElfConverter};
 use object::Object;
 
 use crate::elf::retarget_machine;
@@ -349,6 +349,7 @@ fn downloads_validated_debuginfo_and_reuses_the_cache_offline() {
     let stripped = strip_debug(directory.path(), &image);
     let debug_bytes = std::fs::read(debug).unwrap();
     let (server, handle) = serve_debuginfo_once(debug_bytes);
+    let expected_server = server.clone();
     let options = ConversionOptions {
         debug_directories: Vec::new(),
         debuginfod_urls: vec![server],
@@ -357,7 +358,30 @@ fn downloads_validated_debuginfo_and_reuses_the_cache_offline() {
     };
     let converter = ElfConverter::new(options);
 
-    let downloaded = converter.convert_path(&stripped).unwrap();
+    let mut requests = Vec::new();
+    let downloaded = converter
+        .convert_path_with_observer(&stripped, |event| {
+            if let DiscoveryEvent::DebuginfodRequest {
+                artifact,
+                build_id,
+                endpoint,
+                related_path,
+            } = event
+            {
+                requests.push((
+                    artifact,
+                    build_id.to_owned(),
+                    endpoint.to_owned(),
+                    related_path.to_path_buf(),
+                ));
+            }
+        })
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "debug file");
+    assert!(!requests[0].1.is_empty());
+    assert_eq!(requests[0].2, expected_server);
+    assert_eq!(requests[0].3, stripped);
     assert!(downloaded.stats.dwarf_functions > 0);
     let cache_path = downloaded
         .discovered_debug
@@ -372,6 +396,44 @@ fn downloads_validated_debuginfo_and_reuses_the_cache_offline() {
     let cached = converter.convert_path(&stripped).unwrap();
     assert_eq!(cached.discovered_debug.as_deref(), Some(cache_path));
     assert!(cached.stats.dwarf_functions > 0);
+}
+
+#[cfg(feature = "debuginfod")]
+#[test]
+fn coalesces_repeated_debuginfod_requests_for_one_build_id() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let directory = tempfile::tempdir().unwrap();
+    let (image, debug) = compile_debug_pair(directory.path());
+    let stripped = strip_debug(directory.path(), &image);
+    let (server, handle) = serve_debuginfo_once(std::fs::read(debug).unwrap());
+    let converter = ElfConverter::new(ConversionOptions {
+        debug_directories: Vec::new(),
+        debuginfod_urls: vec![server],
+        debuginfod_cache: directory.path().join("cache"),
+        ..ConversionOptions::default()
+    });
+    let request_count = AtomicUsize::new(0);
+
+    std::thread::scope(|scope| {
+        let conversions = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    converter
+                        .convert_path_with_observer(&stripped, |_| {
+                            request_count.fetch_add(1, Ordering::Relaxed);
+                        })
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for conversion in conversions {
+            assert!(conversion.join().unwrap().stats.dwarf_functions > 0);
+        }
+    });
+
+    handle.join().unwrap();
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
 }
 
 #[cfg(feature = "debuginfod")]
@@ -434,31 +496,80 @@ fn rejects_debuginfod_responses_with_the_wrong_build_id() {
     )));
 }
 
-#[test]
-fn discovers_gnu_debugaltlink_supplementary_files() {
-    let directory = tempfile::tempdir().unwrap();
-    let (image, supplementary) = compile_debug_pair(directory.path());
+/// Assembles a `.gnu_debugaltlink` pair and converts the image.
+fn convert_debugaltlink_pair(
+    directory: &std::path::Path,
+    linked_name: &str,
+) -> gsym::convert::ConversionReport {
+    let yaml2obj = crate::tools::required_tool("yaml2obj");
+    let build = |source: &str, name: &str| {
+        let yaml = directory.join(format!("{name}.yaml"));
+        let object = directory.join(name);
+        std::fs::write(&yaml, source).unwrap();
+        run(Command::new(&yaml2obj).args([yaml.to_str().unwrap(), "-o", object.to_str().unwrap()]));
+        object
+    };
+    let image = build(
+        include_str!("../fixtures/debugaltlink_image.yaml"),
+        "altlink.image",
+    );
+    let supplementary = build(
+        include_str!("../fixtures/debugaltlink_supplementary.yaml"),
+        "supplementary.debug",
+    );
+
     let bytes = std::fs::read(&supplementary).unwrap();
     let parsed = object::File::parse(bytes.as_slice()).unwrap();
-    let build_id = parsed.build_id().unwrap().unwrap();
-    let payload = directory.path().join("debugaltlink.bin");
-    let mut section = b"discover.debug\0".to_vec();
-    section.extend_from_slice(build_id);
+    let mut section = linked_name.as_bytes().to_vec();
+    section.push(0);
+    section.extend_from_slice(parsed.build_id().unwrap().unwrap());
+    let payload = directory.join("debugaltlink.bin");
     std::fs::write(&payload, section).unwrap();
-    let with_altlink = directory.path().join("discover.altlink");
+
+    let linked = directory.join("altlink.linked");
     run(Command::new("objcopy").args([
         "--add-section",
         &format!(".gnu_debugaltlink={}", payload.display()),
         image.to_str().unwrap(),
-        with_altlink.to_str().unwrap(),
+        linked.to_str().unwrap(),
     ]));
+    ElfConverter::new(ConversionOptions::default())
+        .convert_path(&linked)
+        .unwrap()
+}
 
-    let report = ElfConverter::new(ConversionOptions::default())
-        .convert_path(&with_altlink)
-        .unwrap();
+#[test]
+fn resolves_names_through_gnu_debugaltlink_supplementary_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = convert_debugaltlink_pair(directory.path(), "supplementary.debug");
+
     assert_eq!(
         report.discovered_supplementary.as_deref(),
-        Some(supplementary.as_path())
+        Some(directory.path().join("supplementary.debug").as_path())
     );
-    assert!(report.stats.dwarf_functions > 0);
+    assert_eq!(report.stats.dwarf_functions, 1, "{:?}", report.warnings);
+    let function = report
+        .builder
+        .functions()
+        .iter()
+        .find(|function| function.name == b"supplementary_origin")
+        .expect("the name must be read from the supplementary object");
+    assert_eq!(function.range, gsym::AddressRange::new(0x1000, 0x1100));
+}
+
+/// A link nothing resolves must leave the reference unresolved, not invented.
+#[test]
+fn unresolved_gnu_debugaltlink_links_convert_without_supplementary_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = convert_debugaltlink_pair(directory.path(), "absent.debug");
+
+    assert!(report.discovered_supplementary.is_none());
+    assert!(
+        report
+            .builder
+            .functions()
+            .iter()
+            .all(|function| function.name != b"supplementary_origin"),
+        "a name was resolved without the supplementary object"
+    );
 }

@@ -174,7 +174,7 @@ fn encode(case: &Case) -> Option<Vec<u8>> {
 
     let mut start = 0x10_0000_u64;
     for (index, seed) in case.functions.iter().take(function_count).enumerate() {
-        start = start.checked_add(u64::from(seed.gap % 64))?;
+        start = advance(start, u64::from(seed.gap % 64));
         let width = u64::from(seed.width).max(1);
         let range = AddressRange::new(start, start + width);
         let assigned_file = file_at(&files, index);
@@ -229,9 +229,16 @@ fn encode(case: &Case) -> Option<Vec<u8>> {
                 )
             })
             .ok()?;
-        start = range.end.checked_add(0x100)?;
+        start = advance(range.end, 0x100);
     }
     builder.to_bytes().ok()
+}
+
+/// Advances the synthetic address cursor that lays generated functions out.
+const fn advance(start: u64, step: u64) -> u64 {
+    start
+        .checked_add(step)
+        .expect("generated function addresses must never overflow")
 }
 
 fn inline_chain(
@@ -283,7 +290,7 @@ fn clean_bytes(bytes: &[u8], fallback: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn file_at(files: &[FileIndex], index: usize) -> FileIndex {
+const fn file_at(files: &[FileIndex], index: usize) -> FileIndex {
     if files.is_empty() {
         FileIndex::ZERO
     } else {

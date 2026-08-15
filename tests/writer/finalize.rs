@@ -2,7 +2,7 @@
 
 use gsym::{
     AddressRange, BuilderOptions, CallSite, CallSiteFlags, Endian, Error, FileEntry, Function,
-    Gsym, GsymBuilder, GsymVersion, LineEntry, WriterOptions,
+    FunctionSetPolicy, Gsym, GsymBuilder, GsymVersion, LineEntry, WriterOptions,
 };
 
 fn function(start: u64, size: u64, name: &[u8]) -> Function {
@@ -180,7 +180,7 @@ fn finalize_repairs_the_last_zero_sized_symbol_to_the_text_end() {
 #[test]
 fn zero_sized_repair_updates_merged_alias_ranges() -> gsym::Result<()> {
     let mut builder = GsymBuilder::new()
-        .merge_equal_address_functions(true)
+        .function_set(FunctionSetPolicy::MergeEqualRanges)
         .executable_ranges([AddressRange::new(0x1000, 0x1100)]);
     builder.add_function(Function::new(AddressRange::new(0x1010, 0x1010), b"first"))?;
     builder.add_function(Function::new(AddressRange::new(0x1010, 0x1010), b"alias"))?;
@@ -215,22 +215,28 @@ fn zero_sized_repair_can_be_disabled() {
     );
 }
 
+/// Duplicate zero-sized symbols collapse to one record with a stable name.
 #[test]
 fn finalize_combines_multiple_zero_sized_symbols_at_one_address() {
+    let foo = function(0x1800, 0, b"foo");
+    let bar = function(0x1800, 0, b"bar");
     for version in [GsymVersion::V1, GsymVersion::V2] {
         for endian in [Endian::Little, Endian::Big] {
-            let bytes = encoded(
-                version,
-                endian,
-                0x1800,
-                [function(0x1800, 0, b"foo"), function(0x1800, 0, b"bar")],
-            );
-            let gsym = Gsym::parse(&bytes).unwrap();
-            assert_eq!(gsym.functions().count(), 1);
-            assert_eq!(
-                gsym.function(0).unwrap().range(),
-                AddressRange::new(0x1800, 0x1800)
-            );
+            for functions in [[foo.clone(), bar.clone()], [bar.clone(), foo.clone()]] {
+                let inserted = functions
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect::<Vec<_>>();
+                let bytes = encoded(version, endian, 0x1800, functions);
+                let gsym = Gsym::parse(&bytes).unwrap();
+                assert_eq!(gsym.functions().count(), 1);
+                let decoded = gsym.function(0).unwrap().decode().unwrap();
+                assert_eq!(decoded.range, AddressRange::new(0x1800, 0x1800));
+                assert_eq!(
+                    decoded.name, b"foo",
+                    "insertion order {inserted:?} changed the surviving symbol"
+                );
+            }
         }
     }
 }
@@ -291,6 +297,35 @@ fn mangled_name_replacement_rejects_unrelated_names() {
         .decode()
         .unwrap();
     assert_eq!(decoded.name, b"bar");
+}
+
+#[test]
+fn duplicate_selection_prefers_richness_over_lexical_name_order() {
+    let range = AddressRange::new(0x4800, 0x4820);
+    let richer = Function {
+        lines: vec![
+            LineEntry::new(0x4800, 0.into(), 10),
+            LineEntry::new(0x4810, 0.into(), 11),
+        ],
+        ..Function::new(range, b"alpha")
+    };
+    let poorer = Function {
+        lines: vec![LineEntry::new(0x4800, 0.into(), 10)],
+        ..Function::new(range, b"zulu")
+    };
+    let expected_lines = richer.lines.clone();
+
+    for functions in [[richer.clone(), poorer.clone()], [poorer, richer]] {
+        let bytes = encoded(GsymVersion::V1, Endian::Little, range.start, functions);
+        let decoded = Gsym::parse(bytes)
+            .unwrap()
+            .function(0)
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert_eq!(decoded.name, b"alpha");
+        assert_eq!(decoded.lines, expected_lines);
+    }
 }
 
 #[test]

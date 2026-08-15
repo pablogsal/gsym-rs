@@ -2,42 +2,18 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 
 use gsym::{AddressRange, Endian, Function, Gsym, GsymBuilder, GsymVersion};
 
-fn binary() -> &'static Path {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
-    BINARY
-        .get_or_init(|| {
-            if let Some(binary) = option_env!("CARGO_BIN_EXE_gsymtool") {
-                return PathBuf::from(binary);
-            }
-
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let status = Command::new(env!("CARGO"))
-                .args(["build", "--quiet", "-p", "gsymtool"])
-                .current_dir(&root)
-                .status()
-                .expect("start cargo build for gsymtool");
-            assert!(status.success(), "cargo could not build gsymtool");
-
-            let target = std::env::var_os("CARGO_TARGET_DIR")
-                .map_or_else(|| root.join("target"), PathBuf::from);
-            target.join("debug").join("gsymtool")
-        })
-        .as_path()
-}
-
 fn run(arguments: &[&str]) -> Output {
-    Command::new(binary())
+    Command::new(env!("CARGO_BIN_EXE_gsymtool"))
         .args(arguments)
         .output()
         .expect("run gsymtool")
 }
 
 fn run_ok(arguments: &[&str]) -> Output {
-    crate::tools::run(Command::new(binary()).args(arguments))
+    crate::tools::run(Command::new(env!("CARGO_BIN_EXE_gsymtool")).args(arguments))
 }
 
 /// Compile a tiny relocatable ELF with DWARF, named so the batch can find it.
@@ -103,8 +79,14 @@ fn cmdline_converts_a_directory_tree_in_parallel() {
     ]);
 
     let stderr = String::from_utf8_lossy(&batch.stderr);
+    assert!(
+        stderr.contains("scanning 1 input for ELF files"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("converting 2 ELF files"), "{stderr}");
     assert!(stderr.contains("converted    2 of 2 files"), "{stderr}");
     assert!(stderr.contains("1 non-ELF path"), "{stderr}");
+    assert!(!stderr.contains("ok:"), "{stderr}");
     assert_converted(&output.join("alpha.bin.gsym"), b"alpha");
     assert_converted(&output.join("sub").join("beta.bin.gsym"), b"beta");
     assert!(!output.join("notes.txt.gsym").exists());

@@ -19,3 +19,6 @@ clap_complete = "4.5"
 hex = "0.4"
 gsym-rs = { path = "..", features = ["convert", "debuginfod", "mmap"] }
 tempfile = "3.20"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = "0.1.52"

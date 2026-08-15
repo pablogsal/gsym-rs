@@ -48,12 +48,7 @@ fuzz_target!(|data: &[u8]| {
                     &mut scratch,
                 ));
             }
-            drop(gsym.for_each_frame(
-                address,
-                FrameLookupOptions::default(),
-                &mut scratch,
-                |_| {},
-            ));
+            drop(gsym.for_each_frame(address, FrameLookupOptions::default(), &mut scratch, |_| {}));
         }
     }
 });

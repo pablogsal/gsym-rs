@@ -1,13 +1,77 @@
+use std::collections::HashMap;
 #[cfg(feature = "debuginfod")]
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "debuginfod")]
+use std::sync::OnceLock;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use object::{Object, ObjectSection};
 
 use super::super::ConversionWarning;
-use super::ConversionOptions;
 use super::image::{cross_check_elf_identity, malformed, parse_elf};
+use super::{ConversionOptions, DiscoveryEvent};
 use crate::{ElfInputKind, Error, Result};
+
+#[derive(Debug, Default)]
+pub(super) struct DiscoveryCache {
+    requests: Mutex<HashMap<String, Arc<PendingRequest>>>,
+}
+
+#[derive(Debug, Default)]
+struct PendingRequest {
+    found: Mutex<Option<bool>>,
+    ready: Condvar,
+}
+
+impl DiscoveryCache {
+    fn begin(&self, build_id: &str) -> (Arc<PendingRequest>, bool) {
+        let mut requests = lock(&self.requests);
+        let result = match requests.entry(build_id.to_owned()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (Arc::clone(entry.get()), false),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let request = Arc::new(PendingRequest::default());
+                entry.insert(Arc::clone(&request));
+                (request, true)
+            }
+        };
+        drop(requests);
+        result
+    }
+
+    fn finish(&self, build_id: &str, request: &Arc<PendingRequest>, found: bool) {
+        let mut requests = lock(&self.requests);
+        request.finish(found);
+        if requests
+            .get(build_id)
+            .is_some_and(|pending| Arc::ptr_eq(pending, request))
+        {
+            requests.remove(build_id);
+        }
+    }
+}
+
+impl PendingRequest {
+    fn finish(&self, found: bool) {
+        *lock(&self.found) = Some(found);
+        self.ready.notify_all();
+    }
+
+    fn wait(&self) -> bool {
+        let mut found = lock(&self.found);
+        while found.is_none() {
+            found = self
+                .ready
+                .wait(found)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        matches!(*found, Some(true))
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Debug, Default)]
 pub(super) struct Discovery {
@@ -125,6 +189,8 @@ pub(super) fn discover_supplementary(
     debug_path: &Path,
     debug_bytes: &[u8],
     options: &ConversionOptions,
+    cache: &DiscoveryCache,
+    observer: &mut dyn FnMut(DiscoveryEvent<'_>),
 ) -> Result<Discovery> {
     let debug = parse_elf(debug_bytes, ElfInputKind::Debug)?;
     let Some((name, expected_id)) = debug
@@ -173,6 +239,9 @@ pub(super) fn discover_supplementary(
         None,
         options,
         "supplementary debug file",
+        debug_path,
+        cache,
+        observer,
     ))
 }
 
@@ -180,6 +249,8 @@ pub(super) fn discover_separate_debug(
     image_path: &Path,
     image_bytes: &[u8],
     options: &ConversionOptions,
+    cache: &DiscoveryCache,
+    observer: &mut dyn FnMut(DiscoveryEvent<'_>),
 ) -> Result<Discovery> {
     let image = parse_elf(image_bytes, ElfInputKind::Image)?;
     if let Some((name, expected_crc)) = debug_link(&image)? {
@@ -244,6 +315,9 @@ pub(super) fn discover_separate_debug(
             Some(&image),
             options,
             "debug file",
+            image_path,
+            cache,
+            observer,
         ));
     }
     Ok(Discovery::default())
@@ -254,6 +328,9 @@ fn discover_with_debuginfod(
     image: Option<&object::File<'_>>,
     options: &ConversionOptions,
     kind: &'static str,
+    related_path: &Path,
+    cache: &DiscoveryCache,
+    observer: &mut dyn FnMut(DiscoveryEvent<'_>),
 ) -> Discovery {
     if build_id.is_empty() {
         return Discovery::default();
@@ -274,24 +351,59 @@ fn discover_with_debuginfod(
             warnings: Vec::new(),
         };
     }
-    fetch_debuginfod(build_id, &build_id_hex, image, options, kind, &cache_path)
+    let (request, owner) = cache.begin(&build_id_hex);
+    if !owner {
+        if request.wait()
+            && let Ok(bytes) = std::fs::read(&cache_path)
+            && valid_debuginfod_response(image, build_id, &bytes)
+        {
+            return Discovery {
+                artifact: Some(DiscoveredArtifact {
+                    path: cache_path,
+                    bytes,
+                }),
+                warnings: Vec::new(),
+            };
+        }
+        return Discovery::default();
+    }
+    let discovery = fetch_debuginfod(
+        build_id,
+        image,
+        options,
+        kind,
+        related_path,
+        &cache_path,
+        observer,
+    );
+    cache.finish(&build_id_hex, &request, discovery.artifact.is_some());
+    discovery
 }
+
+#[cfg(feature = "debuginfod")]
+static HTTP_CLIENT: OnceLock<
+    std::result::Result<debuginfod_client::reqwest::blocking::Client, String>,
+> = OnceLock::new();
 
 #[cfg(feature = "debuginfod")]
 fn fetch_debuginfod(
     build_id: &[u8],
-    build_id_hex: &str,
     image: Option<&object::File<'_>>,
     options: &ConversionOptions,
     kind: &'static str,
+    related_path: &Path,
     cache_path: &Path,
+    observer: &mut dyn FnMut(DiscoveryEvent<'_>),
 ) -> Discovery {
+    let build_id_hex = hex::encode(build_id);
     let mut warnings = Vec::new();
-    let http_client = match debuginfod_client::reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
-        Ok(client) => client,
+    let http_client = match HTTP_CLIENT.get_or_init(|| {
+        debuginfod_client::reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(client) => client.clone(),
         Err(error) => {
             warnings.push(ConversionWarning::Debuginfod {
                 endpoint: None,
@@ -305,6 +417,12 @@ fn fetch_debuginfod(
     };
     let requested_build_id = debuginfod_client::BuildId::raw(build_id);
     for server in &options.debuginfod_urls {
+        observer(DiscoveryEvent::DebuginfodRequest {
+            artifact: kind,
+            build_id: &build_id_hex,
+            endpoint: server,
+            related_path,
+        });
         let client = match debuginfod_client::Client::builder()
             .http_client(http_client.clone())
             .build([server.as_str()])
@@ -384,11 +502,12 @@ fn fetch_debuginfod(
 #[cfg(not(feature = "debuginfod"))]
 fn fetch_debuginfod(
     _build_id: &[u8],
-    _build_id_hex: &str,
     _image: Option<&object::File<'_>>,
     options: &ConversionOptions,
     _kind: &'static str,
+    _related_path: &Path,
     _cache_path: &Path,
+    _observer: &mut dyn FnMut(DiscoveryEvent<'_>),
 ) -> Discovery {
     let warnings = (!options.debuginfod_urls.is_empty())
         .then(|| ConversionWarning::Debuginfod {
@@ -464,4 +583,20 @@ fn debug_link(file: &object::File<'_>) -> Result<Option<(PathBuf, u32)>> {
     }
     let name = String::from_utf8_lossy(name);
     Ok(Some((PathBuf::from(name.as_ref()), crc)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiscoveryCache;
+
+    #[test]
+    fn completed_requests_do_not_prevent_retries() {
+        let cache = DiscoveryCache::default();
+        let (first, owner) = cache.begin("build-id");
+        assert!(owner);
+        cache.finish("build-id", &first, false);
+
+        let (_, owner) = cache.begin("build-id");
+        assert!(owner);
+    }
 }

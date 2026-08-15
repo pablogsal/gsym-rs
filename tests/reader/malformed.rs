@@ -1,10 +1,14 @@
 //! Corrupt, truncated and arbitrary inputs must fail rather than panic.
 
-use gsym::{Gsym, GsymVersion};
+use std::sync::LazyLock;
+
+use gsym::{Endian, Gsym, GsymVersion, TranscodeOptions};
 use proptest::prelude::*;
 
 use crate::bytes::{ByteOrder, as_u64, patch_uint};
-use crate::fixture::{RawFunction, build, inline_info, line_table, offset_width, string_offsets};
+use crate::fixture::{
+    RawFunction, build, call_sites, inline_info, line_table, merged, offset_width, string_offsets,
+};
 use crate::minimal::{minimal_v1, minimal_v2};
 
 #[test]
@@ -60,11 +64,10 @@ fn rejects_v1_string_tables_outside_the_file() {
     assert!(Gsym::parse(&bytes).is_err());
 }
 
+/// The first `GlobalData` entry starts at byte 20 and its 64-bit file offset
 #[test]
 fn rejects_v2_sections_outside_the_file() {
     let mut bytes = minimal_v2(ByteOrder::Little);
-    // First GlobalData entry starts at byte 20; its 64-bit file offset starts
-    // at byte 24.
     bytes[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(Gsym::parse(&bytes).is_err());
 }
@@ -193,9 +196,125 @@ fn lookup_defers_full_inline_range_validation_to_verify() {
     }
 }
 
+/// Valid images that the mutating property tests start from.
+static SEED_IMAGES: LazyLock<Vec<Vec<u8>>> = LazyLock::new(|| {
+    let offsets = string_offsets();
+    let files = [
+        (offsets.empty, offsets.empty),
+        (offsets.tmp, offsets.main_c),
+        (offsets.tmp, offsets.foo_h),
+    ];
+    let mut images = vec![
+        minimal_v1(ByteOrder::Little),
+        minimal_v1(ByteOrder::Big),
+        minimal_v2(ByteOrder::Little),
+        minimal_v2(ByteOrder::Big),
+    ];
+    for version in [GsymVersion::V1, GsymVersion::V2] {
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let function = RawFunction {
+                address: 0x1000,
+                size: 0x100,
+                name: offsets.main,
+                records: vec![
+                    (1, line_table()),
+                    (2, inline_info(offsets, version, order)),
+                    (3, merged(offsets, version, order)),
+                    (4, call_sites(offsets, version, order)),
+                ],
+            };
+            images.push(build(version, order, &[function], &files).bytes);
+        }
+    }
+    images
+});
+
+/// GSYM's little-endian magic, which also spells the big-endian `GSYM_CIGAM`.
+const MAGIC: u32 = 0x4753_594d;
+
+/// Reads `bytes` through every decoder a hostile file reaches.
+fn exercise(bytes: &[u8]) {
+    let Ok(gsym) = Gsym::parse(bytes) else {
+        return;
+    };
+    let header = gsym.header();
+    let _build_id: &[u8] = gsym.build_id();
+    drop(gsym.string(0));
+    drop(gsym.string(u64::MAX));
+    for index in 0..usize::min(header.address_count as usize, 32) {
+        if let Ok(function) = gsym.function(index) {
+            let _range = function.range();
+            drop(function.decode());
+        }
+    }
+    for index in 0_u32..8 {
+        drop(gsym.file(index));
+    }
+    drop(gsym.file(u32::MAX));
+    for address in [0, 0x0fff, 0x1000, 0x1012, 0x1020, 0x1100, u64::MAX] {
+        drop(gsym.lookup(address));
+    }
+    if gsym.verify().is_ok() {
+        drop(gsym.decode_all());
+        drop(gsym.transcode(TranscodeOptions {
+            version: Some(if header.version == GsymVersion::V1 {
+                GsymVersion::V2
+            } else {
+                GsymVersion::V1
+            }),
+            endian: Some(match header.endian {
+                Endian::Little => Endian::Big,
+                Endian::Big => Endian::Little,
+            }),
+        }));
+    }
+}
+
 proptest! {
+    /// Corrupting a valid image must never panic, and the images must stay valid.
     #[test]
-    fn arbitrary_bytes_never_panic(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
-        drop(Gsym::parse(&data).and_then(|gsym| gsym.verify().map(|_| ())));
+    fn mutating_valid_images_never_panics(
+        selected in 0..SEED_IMAGES.len(),
+        edits in proptest::collection::vec((any::<u16>(), 1_u8..=u8::MAX), 0..24),
+        truncation in proptest::option::of(any::<u16>()),
+        appended in proptest::collection::vec(any::<u8>(), 0..64),
+    ) {
+        let mut bytes = SEED_IMAGES[selected].clone();
+        let parsed = Gsym::parse(&bytes);
+        prop_assert!(
+            parsed.is_ok_and(|gsym| gsym.verify().is_ok()),
+            "seed image {selected} must parse and verify"
+        );
+
+        for (offset, value) in edits {
+            let index = usize::from(offset) % bytes.len();
+            bytes[index] ^= value;
+        }
+        if let Some(length) = truncation {
+            bytes.truncate(usize::from(length) % bytes.len());
+        }
+        bytes.extend_from_slice(&appended);
+        exercise(&bytes);
+    }
+
+    /// Arbitrary bytes behind a header prefix the reader accepts must not panic.
+    #[test]
+    fn arbitrary_bytes_behind_a_valid_header_prefix_never_panic(
+        big_endian in any::<bool>(),
+        version in 1_u16..=2,
+        address_offset_size in proptest::sample::select(&[1_u8, 2, 4, 8][..]),
+        rest in proptest::collection::vec(any::<u8>(), 0..4096),
+    ) {
+        let mut bytes = Vec::with_capacity(rest.len() + 8);
+        if big_endian {
+            bytes.extend_from_slice(&MAGIC.to_be_bytes());
+            bytes.extend_from_slice(&version.to_be_bytes());
+        } else {
+            bytes.extend_from_slice(&MAGIC.to_le_bytes());
+            bytes.extend_from_slice(&version.to_le_bytes());
+        }
+        bytes.push(address_offset_size);
+        bytes.extend_from_slice(&rest);
+        exercise(&bytes);
     }
 }

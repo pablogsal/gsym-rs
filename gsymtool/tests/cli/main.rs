@@ -4,9 +4,9 @@
 //! pins its own feature set, so these tests only need `convert` for the
 //! in-process conversion `interop` performs before handing bytes to LLVM.
 
-#![cfg(all(target_os = "linux", feature = "convert"))]
+#![cfg(target_os = "linux")]
 
-#[path = "../common/tools.rs"]
+#[path = "../../../tests/common/tools.rs"]
 mod tools;
 
 mod gsymtool;

@@ -137,3 +137,98 @@ fn bounded_leb_rejects_truncation_overflow_and_bad_widths() {
         assert!(read_sleb_bounded(&mut value, 65).is_err());
     }
 }
+
+#[test]
+fn leb_examples_round_trip() {
+    let unsigned = [0_u64, 1, 127, 128, 624_485, u64::MAX];
+    for value in unsigned {
+        let mut encoded = Encoder::new(Endian::Little);
+        write_uleb(&mut encoded, value);
+        let mut cursor = Cursor::new(encoded.as_slice(), Endian::Big);
+        assert_eq!(read_uleb(&mut cursor).unwrap(), value);
+        assert!(cursor.is_empty());
+    }
+
+    let signed = [i64::MIN, -624_485, -65, -64, -1, 0, 63, 64, i64::MAX];
+    for value in signed {
+        let mut encoded = Encoder::new(Endian::Little);
+        write_sleb(&mut encoded, value);
+        let mut cursor = Cursor::new(encoded.as_slice(), Endian::Big);
+        assert_eq!(read_sleb(&mut cursor).unwrap(), value);
+        assert!(cursor.is_empty());
+    }
+}
+
+#[test]
+fn thirty_two_bit_requests_accept_their_width_and_reject_the_next_value() {
+    let mut encoded = Encoder::new(Endian::Little);
+    write_uleb(&mut encoded, 0xffff_ffff);
+    write_uleb(&mut encoded, 0x1_0000_0000);
+    let mut cursor = Cursor::new(encoded.as_slice(), Endian::Little);
+    assert_eq!(read_uleb_bounded(&mut cursor, 32).unwrap(), 0xffff_ffff);
+    assert!(matches!(
+        read_uleb_bounded(&mut cursor, 32),
+        Err(Error::MalformedUleb {
+            reason: "value exceeds requested bit width",
+            ..
+        })
+    ));
+
+    let mut encoded = Encoder::new(Endian::Little);
+    write_sleb(&mut encoded, -2_147_483_648);
+    write_sleb(&mut encoded, -2_147_483_649);
+    let mut cursor = Cursor::new(encoded.as_slice(), Endian::Little);
+    assert_eq!(read_sleb_bounded(&mut cursor, 32).unwrap(), -2_147_483_648);
+    assert!(matches!(
+        read_sleb_bounded(&mut cursor, 32),
+        Err(Error::MalformedSleb {
+            reason: "value exceeds requested bit width",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn sixty_four_bit_requests_match_the_unbounded_readers() {
+    let unsigned_overflow = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02];
+    let mut plain = Cursor::new(&unsigned_overflow, Endian::Little);
+    let mut bounded = Cursor::new(&unsigned_overflow, Endian::Little);
+    let plain_error = read_uleb(&mut plain).unwrap_err().to_string();
+    assert_eq!(
+        plain_error,
+        read_uleb_bounded(&mut bounded, 64).unwrap_err().to_string()
+    );
+    assert!(plain_error.contains("value exceeds u64"));
+
+    let signed_overflow = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x40];
+    let mut plain = Cursor::new(&signed_overflow, Endian::Little);
+    let mut bounded = Cursor::new(&signed_overflow, Endian::Little);
+    let plain_error = read_sleb(&mut plain).unwrap_err().to_string();
+    assert_eq!(
+        plain_error,
+        read_sleb_bounded(&mut bounded, 64).unwrap_err().to_string()
+    );
+    assert!(plain_error.contains("value exceeds i64"));
+
+    let mut encoded = Encoder::new(Endian::Little);
+    write_uleb(&mut encoded, u64::MAX);
+    let mut cursor = Cursor::new(encoded.as_slice(), Endian::Little);
+    assert_eq!(read_uleb_bounded(&mut cursor, 64).unwrap(), u64::MAX);
+
+    let mut encoded = Encoder::new(Endian::Little);
+    write_sleb(&mut encoded, i64::MIN);
+    let mut cursor = Cursor::new(encoded.as_slice(), Endian::Little);
+    assert_eq!(read_sleb_bounded(&mut cursor, 64).unwrap(), i64::MIN);
+}
+
+#[test]
+fn fixed_width_reads_and_patches_reject_out_of_bounds() {
+    let mut input = Cursor::new(&[1, 2], Endian::Little);
+    assert!(input.read_u32().is_err());
+
+    let mut output = Encoder::new(Endian::Little);
+    output.write_u8(1);
+    output.align_to(4).unwrap();
+    assert_eq!(output.as_slice(), &[1, 0, 0, 0]);
+    assert!(output.patch_u32(1, 7).is_err());
+}

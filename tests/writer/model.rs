@@ -20,7 +20,8 @@ fn call_site_flags_compose_without_discarding_unknown_bits() {
 fn reversed_ranges_never_contain_addresses_or_ranges() {
     let reversed = AddressRange::new(20, 10);
     assert!(!reversed.is_valid());
-    assert!(!reversed.is_empty());
+    assert_eq!(reversed.size(), 0);
+    assert!(reversed.is_empty());
     assert!(!reversed.contains(15));
     assert!(!reversed.contains_range(AddressRange::new(12, 14)));
 }

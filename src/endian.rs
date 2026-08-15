@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use crate::error::{Error, Result};
 
 /// Byte order used for fixed-width integers in a GSYM file.
@@ -276,12 +278,10 @@ impl Encoder {
     }
 
     pub(crate) fn align_to(&mut self, alignment: usize) -> Result<()> {
-        if alignment == 0 {
-            return Err(Error::InvalidAlignment(alignment));
-        }
-        let remainder = self.bytes.len().checked_rem(alignment).unwrap_or(0);
+        let alignment = NonZeroUsize::new(alignment).ok_or(Error::InvalidAlignment(alignment))?;
+        let remainder = self.bytes.len() % alignment;
         if remainder != 0 {
-            let padding = alignment.saturating_sub(remainder);
+            let padding = alignment.get().saturating_sub(remainder);
             let new_len = self
                 .bytes
                 .len()
@@ -331,42 +331,5 @@ impl Encoder {
             })?;
         destination.copy_from_slice(encoded.as_slice());
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Cursor, Encoder, Endian};
-
-    #[test]
-    fn fixed_width_round_trip_both_endians() {
-        for endian in [Endian::Little, Endian::Big] {
-            let mut output = Encoder::new(endian);
-            output.write_u8(0x12);
-            output.write_u16(0x3456);
-            output.write_u32(0x789a_bcde);
-            output.write_u64(0x0123_4567_89ab_cdef);
-            output.write_uint(0xa1_b2_c3, 3).unwrap();
-
-            let mut input = Cursor::new(output.as_slice(), endian);
-            assert_eq!(input.read_u8().unwrap(), 0x12);
-            assert_eq!(input.read_u16().unwrap(), 0x3456);
-            assert_eq!(input.read_u32().unwrap(), 0x789a_bcde);
-            assert_eq!(input.read_u64().unwrap(), 0x0123_4567_89ab_cdef);
-            assert_eq!(input.read_uint(3).unwrap(), 0xa1_b2_c3);
-            assert!(input.is_empty());
-        }
-    }
-
-    #[test]
-    fn bounds_and_alignment_are_checked() {
-        let mut input = Cursor::new(&[1, 2], Endian::Little);
-        assert!(input.read_u32().is_err());
-
-        let mut output = Encoder::new(Endian::Little);
-        output.write_u8(1);
-        output.align_to(4).unwrap();
-        assert_eq!(output.as_slice(), &[1, 0, 0, 0]);
-        assert!(output.patch_u32(1, 7).is_err());
     }
 }

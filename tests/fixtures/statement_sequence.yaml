@@ -54,8 +54,7 @@ DWARF:
             - Value: 0x29
         - AbbrCode: 0x0
   debug_line:
-    - Length: 64
-      Version: 2
+    - Version: 2
       PrologueLength: 31
       MinInstLength: 1
       DefaultIsStmt: 1
@@ -90,6 +89,28 @@ DWARF:
         - Opcode: DW_LNS_advance_line
           SData: 2
           Data: 0
+        - Opcode: DW_LNS_extended_op
+          ExtLen: 1
+          SubOpcode: DW_LNE_end_sequence
+          Data: 0
+        - Opcode: DW_LNS_extended_op
+          ExtLen: 9
+          SubOpcode: DW_LNE_set_address
+          Data: 4096
+        - Opcode: DW_LNS_advance_line
+          SData: 199
+          Data: 0
+        - Opcode: DW_LNS_copy
+          Data: 0
+        - Opcode: DW_LNS_advance_pc
+          Data: 16
+        - Opcode: DW_LNS_advance_line
+          SData: 1
+          Data: 0
+        - Opcode: DW_LNS_copy
+          Data: 0
+        - Opcode: DW_LNS_advance_pc
+          Data: 240
         - Opcode: DW_LNS_extended_op
           ExtLen: 1
           SubOpcode: DW_LNE_end_sequence

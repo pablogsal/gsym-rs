@@ -171,7 +171,7 @@ pub mod convert;
 )]
 mod mapped;
 
-pub use builder::{BuilderOptions, GsymBuilder};
+pub use builder::{BuilderOptions, FunctionSetPolicy, GsymBuilder};
 pub use endian::Endian;
 #[cfg(feature = "convert")]
 #[cfg_attr(docsrs, doc(cfg(feature = "convert")))]

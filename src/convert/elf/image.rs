@@ -5,7 +5,6 @@ use object::{
 };
 
 use super::super::is_debug_section;
-use crate::builder::GsymBuilder;
 use crate::model::{AddressRange, Function};
 use crate::{CompanionMismatch, ElfInputKind, Error, Result};
 
@@ -149,13 +148,17 @@ pub(super) fn cross_check_elf_architecture(
     Ok(())
 }
 
-pub(super) fn import_symbols(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SymbolDisposition {
+    Import,
+    Reject,
+}
+
+pub(super) fn visit_symbols(
     file: &object::File<'_>,
     layout: &AddressLayout,
-    builder: &mut GsymBuilder,
-    rejected: &mut usize,
-) -> Result<usize> {
-    let mut imported = 0_usize;
+    mut visitor: impl FnMut(Function, SymbolDisposition) -> Result<()>,
+) -> Result<()> {
     for symbol in file.symbols().chain(file.dynamic_symbols()) {
         if symbol.kind() != SymbolKind::Text || !symbol.is_definition() {
             continue;
@@ -181,27 +184,43 @@ pub(super) fn import_symbols(
         let end = address
             .checked_add(symbol.size())
             .ok_or(Error::Overflow("ELF symbol end"))?;
+        let symbol_range = AddressRange::new(address, end);
         if symbol.size() > u64::from(u32::MAX) {
-            *rejected = rejected.saturating_add(1);
+            visitor(
+                Function {
+                    range: symbol_range,
+                    name,
+                    ..Function::default()
+                },
+                SymbolDisposition::Reject,
+            )?;
             continue;
         }
-        let symbol_range = AddressRange::new(address, end);
         if !layout
             .ranges
             .iter()
             .any(|range| range.contains_range(symbol_range))
         {
-            *rejected = rejected.saturating_add(1);
+            visitor(
+                Function {
+                    range: symbol_range,
+                    name,
+                    ..Function::default()
+                },
+                SymbolDisposition::Reject,
+            )?;
             continue;
         }
-        builder.add_function(Function {
-            range: symbol_range,
-            name,
-            ..Function::default()
-        })?;
-        imported = imported.saturating_add(1);
+        visitor(
+            Function {
+                range: symbol_range,
+                name,
+                ..Function::default()
+            },
+            SymbolDisposition::Import,
+        )?;
     }
-    Ok(imported)
+    Ok(())
 }
 
 pub(super) fn malformed(context: &'static str, error: impl std::fmt::Display) -> Error {

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use criterion::{Criterion, criterion_main};
 
-/// Shared Criterion settings, kept short so the suite stays usable locally.
+/// Shared Criterion settings.
 fn configured() -> Criterion {
     Criterion::default()
         .warm_up_time(Duration::from_secs(1))

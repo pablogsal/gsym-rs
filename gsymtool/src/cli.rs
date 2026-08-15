@@ -43,8 +43,24 @@ pub(crate) struct Cli {
     pub(crate) color: ColorMode,
 
     /// Suppress successful write summaries.
-    #[arg(short, long, global = true, help_heading = "Global options")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        conflicts_with = "verbose",
+        help_heading = "Global options"
+    )]
     pub(crate) quiet: bool,
+
+    /// Print each debuginfod request instead of replacing the live progress line.
+    #[arg(
+        short,
+        long,
+        global = true,
+        conflicts_with = "quiet",
+        help_heading = "Global options"
+    )]
+    pub(crate) verbose: bool,
 
     #[command(subcommand)]
     pub(crate) command: Command,
@@ -151,7 +167,7 @@ pub(crate) struct ConvertArgs {
     #[arg(short, long, conflicts_with = "output")]
     pub(crate) recursive: bool,
 
-    /// Conversions to run at once; defaults to the available parallelism.
+    /// Conversions to run at once; defaults to available parallelism, capped at 8.
     ///
     /// Each job holds one image and its DWARF in memory, so lowering this bounds
     /// peak memory when converting large binaries.
@@ -199,9 +215,23 @@ pub(crate) struct SourceToggles {
     )]
     pub(crate) no_dwarf: bool,
 
+    #[command(flatten)]
+    pub(crate) discovery: DiscoveryToggles,
+}
+
+/// How conversion discovers local and remote debug companions.
+#[derive(Debug, Args)]
+pub(crate) struct DiscoveryToggles {
     /// Do not search debug links, build-ID roots, DWO/DWP paths, or debuginfod.
     #[arg(long)]
     pub(crate) no_discovery: bool,
+
+    /// Allow debuginfod network requests during a batch conversion.
+    ///
+    /// Single-file conversion honors `DEBUGINFOD_URLS` automatically. Batch
+    /// conversion is local-only unless this flag is passed.
+    #[arg(long, conflicts_with = "no_discovery")]
+    pub(crate) debuginfod: bool,
 }
 
 /// How much per-function detail the DWARF import keeps.
@@ -369,17 +399,14 @@ impl FromStr for ByteSize {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let compact = value.replace('_', "");
-        let split = compact
-            .find(|character: char| !character.is_ascii_digit())
-            .unwrap_or(compact.len());
-        let (digits, suffix) = compact.split_at(split);
-        let count = digits
+        let (whole, remainder) = split_digits(compact.trim());
+        let count = whole
             .parse::<u128>()
             .map_err(|_| format!("invalid byte size `{value}`"))?;
-        if count == 0 {
-            return Err("byte size must be greater than zero".to_owned());
-        }
-        let multiplier = match suffix.to_ascii_lowercase().as_str() {
+        let (fraction, suffix) = remainder
+            .strip_prefix('.')
+            .map_or(("", remainder), split_digits);
+        let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
             "" | "b" => 1_u128,
             "k" | "kb" => 1_000,
             "ki" | "kib" => 1 << 10,
@@ -393,12 +420,37 @@ impl FromStr for ByteSize {
                 ));
             }
         };
-        let bytes = count
-            .checked_mul(multiplier)
-            .and_then(|bytes| usize::try_from(bytes).ok())
+        let bytes = scaled_bytes(count, fraction, multiplier)
             .ok_or_else(|| format!("byte size `{value}` does not fit this platform"))?;
+        if bytes == 0 {
+            return Err("byte size must be greater than zero".to_owned());
+        }
         Ok(Self(bytes))
     }
+}
+
+fn split_digits(value: &str) -> (&str, &str) {
+    let split = value
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(value.len());
+    value.split_at(split)
+}
+
+fn scaled_bytes(count: u128, fraction: &str, multiplier: u128) -> Option<usize> {
+    let digits = u32::try_from(fraction.len()).ok()?;
+    let scale = 10_u128.checked_pow(digits)?;
+    let numerator = if fraction.is_empty() {
+        count
+    } else {
+        count
+            .checked_mul(scale)?
+            .checked_add(fraction.parse::<u128>().ok()?)?
+    };
+    let bytes = numerator
+        .checked_mul(multiplier)?
+        .checked_add(scale.checked_div(2)?)?
+        .checked_div(scale)?;
+    usize::try_from(bytes).ok()
 }
 
 impl fmt::Display for ByteSize {
@@ -428,14 +480,19 @@ fn write_byte_size(formatter: &mut fmt::Formatter<'_>, bytes: u64) -> fmt::Resul
         .unwrap_or(&UNITS[3]);
     let whole = bytes.checked_div(divisor).unwrap_or(0);
     if divisor == 1 || bytes.is_multiple_of(divisor) {
-        write!(formatter, "{whole} {unit}")
-    } else {
-        let remainder = bytes.checked_rem(divisor).unwrap_or(0);
-        let tenths = remainder
-            .saturating_mul(10)
-            .checked_div(divisor)
-            .unwrap_or(0);
+        return write!(formatter, "{whole} {unit}");
+    }
+    let tenths = bytes
+        .checked_rem(divisor)
+        .unwrap_or(0)
+        .saturating_mul(10)
+        .saturating_add(divisor.checked_div(2).unwrap_or(0))
+        .checked_div(divisor)
+        .unwrap_or(0);
+    if tenths < 10 {
         write!(formatter, "{whole}.{tenths} {unit}")
+    } else {
+        write!(formatter, "{}.0 {unit}", whole.saturating_add(1))
     }
 }
 
@@ -488,6 +545,35 @@ mod tests {
     }
 
     #[test]
+    fn renders_the_nearest_tenth_rather_than_truncating() {
+        assert_eq!(ByteSize(2047).to_string(), "2.0 KiB");
+        assert_eq!(ByteSize(1945).to_string(), "1.9 KiB");
+        assert_eq!(ByteSize(1024).to_string(), "1 KiB");
+        assert_eq!(ByteSize(1023).to_string(), "1023 B");
+        assert_eq!(HumanBytes((1 << 20) - 1).to_string(), "1024.0 KiB");
+        assert_eq!(HumanBytes((3 << 30) + (1 << 29)).to_string(), "3.5 GiB");
+        assert_eq!(HumanBytes(0).to_string(), "0 B");
+    }
+
+    #[test]
+    fn parses_every_rendering_it_produces() {
+        for bytes in [1_usize, 1023, 1024, 1536, 1945, 2047, 64 << 20, 3 << 30] {
+            let rendered = ByteSize(bytes).to_string();
+            let Ok(parsed) = rendered.parse::<ByteSize>() else {
+                panic!("rendering `{rendered}` did not parse back");
+            };
+            assert!(
+                parsed.get().abs_diff(bytes) <= bytes / 20,
+                "`{rendered}` parsed back as {} rather than about {bytes}",
+                parsed.get()
+            );
+        }
+        assert_eq!("2.0 KiB".parse(), Ok(ByteSize(2048)));
+        assert_eq!("1.5 KiB".parse(), Ok(ByteSize(1536)));
+        assert_eq!("  64 MiB  ".parse(), Ok(ByteSize(64 << 20)));
+    }
+
+    #[test]
     fn rejects_zero_unknown_and_overflowing_byte_sizes() {
         assert_eq!(
             "0".parse::<ByteSize>(),
@@ -508,6 +594,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("--color"));
         assert!(help.contains("--quiet"));
+        assert!(help.contains("--verbose"));
         assert!(help.contains("lookup"));
         assert!(help.contains("completions"));
     }
@@ -587,6 +674,7 @@ mod tests {
             "--recursive",
             "--jobs",
             "8",
+            "--debuginfod",
         ]) else {
             panic!("valid batch command was rejected");
         };
@@ -599,6 +687,7 @@ mod tests {
         );
         assert_eq!(arguments.output_dir, Some(PathBuf::from("out")));
         assert_eq!(arguments.jobs, NonZeroUsize::new(8));
+        assert!(arguments.sources.discovery.debuginfod);
         assert!(arguments.recursive);
         assert!(arguments.output.is_none());
     }

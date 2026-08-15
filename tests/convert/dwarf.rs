@@ -45,28 +45,47 @@ fn convert_statement_sequence_fixture(value: &str) -> gsym::convert::ConversionR
         .unwrap()
 }
 
+/// The rows a converted `selected_sequence` carries, as `(address, line)`.
+fn statement_sequence_lines(report: &gsym::convert::ConversionReport) -> Vec<(u64, u32)> {
+    find_function(report, b"selected_sequence")
+        .expect("the fixture subprogram must convert")
+        .lines
+        .iter()
+        .map(|line| (line.address, line.line))
+        .collect()
+}
+
+/// `DW_AT_LLVM_stmt_sequence` picks one of two sequences over the same code.
 #[test]
 fn honors_valid_statement_sequence_offsets_and_recovers_from_invalid_ones() {
-    let valid = convert_statement_sequence_fixture("0x29");
-    let function = find_function(&valid, b"selected_sequence").unwrap();
+    const FALLBACK: [(u64, u32); 4] = [(0x1000, 10), (0x1000, 200), (0x1010, 11), (0x1010, 201)];
+
+    let first = convert_statement_sequence_fixture("0x29");
     assert_eq!(
-        function
-            .lines
-            .iter()
-            .map(|line| (line.address, line.line))
-            .collect::<Vec<_>>(),
+        statement_sequence_lines(&first),
         [(0x1000, 10), (0x1010, 11)]
     );
     assert!(
-        valid
+        first
+            .warnings
+            .iter()
+            .all(|warning| !matches!(warning, ConversionWarning::InvalidStatementSequence { .. }))
+    );
+
+    let second = convert_statement_sequence_fixture("0x44");
+    assert_eq!(
+        statement_sequence_lines(&second),
+        [(0x1000, 200), (0x1010, 201)]
+    );
+    assert!(
+        second
             .warnings
             .iter()
             .all(|warning| !matches!(warning, ConversionWarning::InvalidStatementSequence { .. }))
     );
 
     let invalid = convert_statement_sequence_fixture("0x2a");
-    let function = find_function(&invalid, b"selected_sequence").unwrap();
-    assert_eq!(function.lines.len(), 2);
+    assert_eq!(statement_sequence_lines(&invalid), FALLBACK);
     assert!(invalid.warnings.iter().any(|warning| matches!(
         warning,
         ConversionWarning::InvalidStatementSequence {
@@ -76,8 +95,7 @@ fn honors_valid_statement_sequence_offsets_and_recovers_from_invalid_ones() {
     )));
 
     let sentinel = convert_statement_sequence_fixture("0xffffffff");
-    let function = find_function(&sentinel, b"selected_sequence").unwrap();
-    assert_eq!(function.lines.len(), 2);
+    assert_eq!(statement_sequence_lines(&sentinel), FALLBACK);
     assert!(
         sentinel
             .warnings

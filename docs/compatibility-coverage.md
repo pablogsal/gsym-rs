@@ -187,7 +187,7 @@ allocating more than 4 GiB in a normal test job.
 | `ARM_AArch64/macho-gsym-callsite-info-exe.yaml` | Excluded | Mach-O executable conversion is outside scope; call-site wire data itself is covered. |
 | `ARM_AArch64/macho-gsym-callsite-info-obj.test` | Excluded | Relocatable Mach-O conversion is outside the Linux linked-ELF contract. |
 | `ARM_AArch64/macho-gsym-merged-callsites-dsym.yaml` | Excluded | Mach-O/dSYM conversion is outside scope; merged functions and call sites are independently ported. |
-| `ARM_AArch64/macho-merged-funcs-dwarf.yaml` | Excluded | Mach-O DWARF conversion is outside scope; `merge_equal_address_functions` is directly tested. |
+| `ARM_AArch64/macho-merged-funcs-dwarf.yaml` | Excluded | Mach-O DWARF conversion is outside scope; `FunctionSetPolicy::MergeEqualRanges` is directly tested. |
 | `X86/elf-dwarf.yaml` | Equivalent | `tests/convert/dwarf.rs::elf_dwarf_and_gsym_only_equivalent_preserves_lines_and_inlines` and the CLI v2 test use real Linux ELF/DWARF. |
 | `X86/elf-dwo.yaml` | Ported | Real compiler-generated skeleton and `.dwo` files verify discovery, ID matching, and function import. |
 | `X86/elf-empty-dir.yaml` | Equivalent | Reserved empty directory/basename strings and file index zero are directly tested through public write/read APIs. |

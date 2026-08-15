@@ -1,3 +1,4 @@
+use crate::endian::Endian;
 use crate::format::line;
 use crate::model::LineEntry;
 
@@ -61,6 +62,9 @@ fn line_table_handles_mixed_delta_and_same_address_rows() {
             lines.last().copied()
         );
     }
+
+    let little = line::encode(&lines, Endian::Little, base).unwrap();
+    assert_eq!(line::decode(&little, Endian::Big, base).unwrap(), lines);
 }
 
 #[test]
@@ -81,7 +85,7 @@ fn line_table_reports_truncation_and_encode_errors() {
     for endian in ENDIANS {
         let bytes = line::encode(&lines, endian, base).unwrap();
         for length in 0..bytes.len() {
-            assert!(line::decode(bytes.get(..length).unwrap(), endian, base).is_err());
+            assert!(line::decode(bytes.split_at(length).0, endian, base).is_err());
         }
         assert!(line::encode(&[], endian, base).is_err());
         assert!(line::encode(&lines, endian, base + 1).is_err());

@@ -55,7 +55,8 @@ fn decode_inputs(data: &[u8]) -> (ElfInputs<'_>, u8) {
         return (ElfInputs::new(data), control);
     };
     let mut lengths = [0_usize; 5];
-    for (length, bytes) in lengths.iter_mut().zip(length_bytes.chunks_exact(4)) {
+    let (length_chunks, _) = length_bytes.as_chunks::<4>();
+    for (length, bytes) in lengths.iter_mut().zip(length_chunks) {
         *length = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
     }
     let mut payload = &header[20..];

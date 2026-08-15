@@ -1,8 +1,8 @@
 //! Builder configuration and the input it refuses to accept.
 
 use gsym::{
-    AddressRange, Endian, Error, FileEntry, Function, GsymBuilder, GsymVersion, InlineNode,
-    LineEntry,
+    AddressRange, Endian, Error, FileEntry, Function, FunctionSetPolicy, GsymBuilder, GsymVersion,
+    InlineNode, LineEntry,
 };
 
 #[test]
@@ -27,7 +27,7 @@ fn builder_configuration_uses_value_semantics() {
         .base_address(0x1000)
         .build_id([1, 2, 3])
         .repair_zero_sized_functions(false)
-        .merge_equal_address_functions(true)
+        .function_set(FunctionSetPolicy::MergeEqualRanges)
         .executable_ranges(ranges);
     let options = builder.options();
 
@@ -37,6 +37,10 @@ fn builder_configuration_uses_value_semantics() {
     assert_eq!(options.writer.build_id, [1, 2, 3]);
     assert!(!options.repair_zero_sized_functions);
     assert!(options.merge_equal_address_functions);
+    assert_eq!(
+        builder.function_set_policy(),
+        FunctionSetPolicy::MergeEqualRanges
+    );
     assert_eq!(options.executable_ranges.as_ref(), ranges);
 }
 

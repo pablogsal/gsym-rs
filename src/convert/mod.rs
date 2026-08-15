@@ -37,8 +37,8 @@ use object::{ObjectSection, SectionKind};
 
 pub use diagnostic::ConversionWarning;
 pub use elf::{
-    ConversionOptions, ConversionReport, ConversionStats, DiscoveryPolicy, DwarfImportOptions,
-    ElfConverter, ElfInputs,
+    ConversionOptions, ConversionReport, ConversionStats, DiscoveryEvent, DiscoveryPolicy,
+    DwarfImportOptions, ElfConverter, ElfInputs,
 };
 
 fn is_debug_section(section: &object::Section<'_, '_>) -> bool {

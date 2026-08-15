@@ -175,7 +175,7 @@ fn function_info_rejects_truncated_payloads_unknown_types_and_bad_end_markers() 
             let bytes = function::encode(&rich_function(width), endian, width).unwrap();
             for length in 0..bytes.len() {
                 assert!(
-                    function::decode_exact(bytes.get(..length).unwrap(), endian, width, 0x1000)
+                    function::decode_exact(bytes.split_at(length).0, endian, width, 0x1000)
                         .is_err()
                 );
             }
@@ -309,7 +309,7 @@ fn inline_encoding_rejects_empty_uncontained_unsorted_and_truncated_trees() {
             let bytes = function::encode(&valid, endian, width).unwrap();
             for length in 0..bytes.len() {
                 assert!(
-                    function::decode_exact(bytes.get(..length).unwrap(), endian, width, 0x1000)
+                    function::decode_exact(bytes.split_at(length).0, endian, width, 0x1000)
                         .is_err()
                 );
             }

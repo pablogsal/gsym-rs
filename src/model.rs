@@ -18,7 +18,10 @@
 /// assert!(!range.contains(0x1020));
 ///
 /// // Endpoints are not checked on construction.
-/// assert!(!AddressRange::new(0x20, 0x10).is_valid());
+/// let reversed = AddressRange::new(0x20, 0x10);
+/// assert!(!reversed.is_valid());
+/// assert_eq!(reversed.size(), 0);
+/// assert!(reversed.is_empty());
 /// ```
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct AddressRange {
@@ -47,10 +50,14 @@ impl AddressRange {
         self.start <= self.end
     }
 
-    /// Returns whether both endpoints are equal.
+    /// Returns whether the range covers no addresses, including reversed ones.
+    ///
+    /// This is defined as [`Self::size`] being zero, so it is also true for the
+    /// reversed endpoints [`Self::is_valid`] rejects: such a range covers
+    /// nothing, and [`Self::contains`] reports `false` for every address in it.
     #[must_use]
     pub const fn is_empty(self) -> bool {
-        self.start == self.end
+        self.size() == 0
     }
 
     /// Returns whether `address` lies in this valid half-open range.
@@ -141,7 +148,7 @@ impl From<FileIndex> for u64 {
 /// A row stays in effect from its address until the next row's address, so a
 /// function's rows must be sorted and must start at or after the function's
 /// start address. The writer rejects rows that violate either rule.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct LineEntry {
     /// Unslid virtual address at which this row becomes active.
     pub address: u64,
@@ -172,7 +179,7 @@ impl LineEntry {
 /// `call_file` and `call_line` describe where the call appears in the *parent*,
 /// not where the inlined body was defined. Address lookup reads them from the
 /// callee to give each outer frame in a [`Lookup`] its source position.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct InlineNode {
     /// Sorted, disjoint address ranges covered by this inline invocation.
     pub ranges: Vec<AddressRange>,
@@ -191,7 +198,7 @@ pub struct InlineNode {
 /// [`match_regex`](Self::match_regex) names the callees that may return to this
 /// address, so a stack walker can check it against the frame above. This crate
 /// stores and returns the patterns without interpreting them.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct CallSite {
     /// Return-address offset relative to the containing function start.
     pub return_offset: u64,
@@ -207,7 +214,7 @@ pub struct CallSite {
 /// survive a decode and re-encode. Use
 /// [`from_bits_retain`](Self::from_bits_retain) to construct a value from a raw
 /// byte and [`bits`](Self::bits) to get it back.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct CallSiteFlags(u8);
 
@@ -289,9 +296,9 @@ impl From<CallSiteFlags> for u8 {
 ///
 /// [`merged`](Self::merged) holds aliases that share this function's address
 /// range, which identical-code folding produces. They are written only when
-/// [`BuilderOptions::merge_equal_address_functions`](crate::BuilderOptions) is
+/// [`FunctionSetPolicy::MergeEqualRanges`](crate::FunctionSetPolicy) is
 /// enabled.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Function {
     /// Function address range.
     pub range: AddressRange,

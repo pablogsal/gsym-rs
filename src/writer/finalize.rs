@@ -1,36 +1,57 @@
-use crate::builder::BuilderOptions;
+use crate::builder::{BuilderOptions, FunctionSetPolicy};
 use crate::model::{AddressRange, Function, InlineNode};
 use crate::normalize::compact_function_lines;
 
-pub(super) fn finalize(functions: Vec<Function>, options: &BuilderOptions) -> Vec<Function> {
+pub(super) fn finalize(
+    functions: Vec<Function>,
+    options: &BuilderOptions,
+    function_set: FunctionSetPolicy,
+) -> Vec<Function> {
     let mut functions = functions;
     compact_function_lines(&mut functions);
     let functions = sort_by_ordering_key(functions);
-    let functions = if options.merge_equal_address_functions {
-        merge_equal_ranges(functions)
-    } else {
-        deduplicate(functions)
+    let functions = match function_set {
+        FunctionSetPolicy::MergeEqualRanges => merge_equal_ranges(functions),
+        FunctionSetPolicy::Deduplicate => deduplicate(functions),
+        FunctionSetPolicy::Preserve => functions,
     };
     repair_final_range(functions, options)
 }
 
-fn sort_by_ordering_key(functions: Vec<Function>) -> Vec<Function> {
-    let mut decorated: Vec<(Richness, Tiebreak, Function)> = functions
-        .into_iter()
-        .map(|function| (richness(&function), semantic_tiebreak(&function), function))
+fn sort_by_ordering_key(mut functions: Vec<Function>) -> Vec<Function> {
+    let mut keyed: Vec<_> = functions
+        .iter()
+        .enumerate()
+        .map(|(index, function)| {
+            (
+                function.range,
+                richness(function),
+                function.name.as_slice(),
+                semantic_tiebreak(function),
+                index,
+            )
+        })
         .collect();
-    decorated.sort_by(|left, right| {
-        (left.2.range, left.0, left.2.name.as_slice(), left.1).cmp(&(
-            right.2.range,
-            right.0,
-            right.2.name.as_slice(),
-            right.1,
-        ))
-    });
-    decorated
-        .into_iter()
-        .map(|(_, _, function)| function)
-        .collect()
+    keyed.sort_unstable();
+    let mut order: Vec<usize> = keyed.into_iter().map(|entry| entry.4).collect();
+    for start in 0..order.len() {
+        let mut current = start;
+        while let Some(source) = order
+            .get(current)
+            .copied()
+            .filter(|source| *source != start)
+        {
+            functions.swap(current, source);
+            if let Some(slot) = order.get_mut(current) {
+                *slot = current;
+            }
+            current = source;
+        }
+        if let Some(slot) = order.get_mut(current) {
+            *slot = current;
+        }
+    }
+    functions
 }
 
 fn merge_equal_ranges(functions: Vec<Function>) -> Vec<Function> {
@@ -39,11 +60,8 @@ fn merge_equal_ranges(functions: Vec<Function>) -> Vec<Function> {
         if let Some(parent) = merged.last_mut()
             && parent.range == function.range
         {
-            if parent
-                .merged
-                .last()
-                .is_none_or(|candidate| *candidate != function)
-            {
+            let previous = parent.merged.last().unwrap_or(&*parent);
+            if *previous != function {
                 parent.merged.push(function);
             }
         } else {
@@ -102,9 +120,32 @@ fn repair_final_range(mut functions: Vec<Function>, options: &BuilderOptions) ->
             start,
             start.saturating_add(end.saturating_sub(start).min(u64::from(u32::MAX))),
         );
-        repair_merged_ranges(last, repaired);
+        if repair_keeps_records(last, repaired) {
+            repair_merged_ranges(last, repaired);
+        }
     }
     functions
+}
+
+fn repair_keeps_records(function: &Function, repaired: AddressRange) -> bool {
+    function
+        .lines
+        .iter()
+        .all(|line| repaired.contains(line.address))
+        && function
+            .call_sites
+            .iter()
+            .all(|call_site| call_site.return_offset < repaired.size())
+        && function.inline.as_ref().is_none_or(|inline| {
+            inline
+                .ranges
+                .iter()
+                .all(|range| repaired.contains_range(*range))
+        })
+        && function
+            .merged
+            .iter()
+            .all(|merged| repair_keeps_records(merged, repaired))
 }
 
 fn repair_merged_ranges(function: &mut Function, repaired: AddressRange) {

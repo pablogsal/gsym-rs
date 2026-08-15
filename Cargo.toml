@@ -65,6 +65,7 @@ workspace = true
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+missing_docs = "warn"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 unused_qualifications = "warn"
@@ -142,6 +143,7 @@ negative_feature_names = "warn"
 redundant_feature_names = "warn"
 wildcard_dependencies = "warn"
 
+get_unwrap = "warn"
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 as_underscore = "warn"

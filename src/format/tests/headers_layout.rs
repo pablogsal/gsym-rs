@@ -2,7 +2,7 @@ use crate::endian::{Encoder, Endian};
 use crate::error::Error;
 use crate::format::{GSYM_MAGIC, v1, v2};
 
-use super::ENDIANS;
+use super::{ENDIANS, patch_byte, patch_bytes};
 
 #[test]
 fn v1_headers_match_reference_fields_endianness_and_errors() {
@@ -17,6 +17,14 @@ fn v1_headers_match_reference_fields_endianness_and_errors() {
     for endian in ENDIANS {
         let bytes = header.encode(endian).unwrap();
         assert_eq!(bytes.len(), v1::HEADER_SIZE);
+        assert_eq!(
+            bytes.split_at(4).0,
+            if endian == Endian::Little {
+                b"MYSG"
+            } else {
+                b"GSYM"
+            }
+        );
         assert_eq!(
             v1::Header::decode(&bytes).unwrap(),
             (header.clone(), endian)
@@ -39,30 +47,24 @@ fn v1_headers_match_reference_fields_endianness_and_errors() {
 
     for length in 0..v1::HEADER_SIZE {
         let encoded = header.encode(Endian::Little).unwrap();
-        assert!(v1::Header::decode(encoded.get(..length).unwrap()).is_err());
+        assert!(v1::Header::decode(encoded.split_at(length).0).is_err());
     }
     let mut bad_version = header.encode(Endian::Little).unwrap();
-    bad_version
-        .get_mut(4..6)
-        .unwrap()
-        .copy_from_slice(&12_u16.to_le_bytes());
+    patch_bytes(&mut bad_version, 4, &12_u16.to_le_bytes());
     assert!(matches!(
         v1::Header::decode(&bad_version),
         Err(Error::UnsupportedVersion(12))
     ));
 
     let mut bad_magic = header.encode(Endian::Little).unwrap();
-    bad_magic
-        .get_mut(..4)
-        .unwrap()
-        .copy_from_slice(&12_u32.to_le_bytes());
+    patch_bytes(&mut bad_magic, 0, &12_u32.to_le_bytes());
     assert!(matches!(
         v1::Header::decode(&bad_magic),
         Err(Error::InvalidMagic(12))
     ));
 
     let mut bad_width = header.encode(Endian::Little).unwrap();
-    *bad_width.get_mut(6).unwrap() = 12;
+    patch_byte(&mut bad_width, 6, 12);
     assert!(matches!(
         v1::Header::decode(&bad_width),
         Err(Error::InvalidAddressOffsetSize {
@@ -72,7 +74,7 @@ fn v1_headers_match_reference_fields_endianness_and_errors() {
     ));
 
     let mut bad_uuid = header.encode(Endian::Little).unwrap();
-    *bad_uuid.get_mut(7).unwrap() = 128;
+    patch_byte(&mut bad_uuid, 7, 128);
     assert!(matches!(
         v1::Header::decode(&bad_uuid),
         Err(Error::InvalidUuidSize(128))
@@ -155,27 +157,21 @@ fn v2_headers_accept_supported_widths_and_reject_invalid_fields() {
         address_count: 1,
     };
     let mut bad_magic = valid.encode(Endian::Little).unwrap();
-    bad_magic
-        .get_mut(..4)
-        .unwrap()
-        .copy_from_slice(&12_u32.to_le_bytes());
+    patch_bytes(&mut bad_magic, 0, &12_u32.to_le_bytes());
     assert!(matches!(
         v2::Header::decode(&bad_magic),
         Err(Error::InvalidMagic(12))
     ));
 
     let mut bad_version = valid.encode(Endian::Little).unwrap();
-    bad_version
-        .get_mut(4..6)
-        .unwrap()
-        .copy_from_slice(&12_u16.to_le_bytes());
+    patch_bytes(&mut bad_version, 4, &12_u16.to_le_bytes());
     assert!(matches!(
         v2::Header::decode(&bad_version),
         Err(Error::UnsupportedVersion(12))
     ));
 
     let mut bad_width = valid.encode(Endian::Little).unwrap();
-    *bad_width.get_mut(6).unwrap() = 12;
+    patch_byte(&mut bad_width, 6, 12);
     assert!(matches!(
         v2::Header::decode(&bad_width),
         Err(Error::InvalidAddressOffsetSize {
@@ -185,7 +181,7 @@ fn v2_headers_accept_supported_widths_and_reject_invalid_fields() {
     ));
 
     let mut bad_encoding = valid.encode(Endian::Little).unwrap();
-    *bad_encoding.get_mut(7).unwrap() = 12;
+    patch_byte(&mut bad_encoding, 7, 12);
     assert!(matches!(
         v2::Header::decode(&bad_encoding),
         Err(Error::UnsupportedStringTableEncoding(12))
@@ -216,7 +212,7 @@ fn encoded_directory(
     .encode_into(&mut output);
     let mut bytes = output.into_inner();
     bytes.resize(layout.file_size, 0);
-    *bytes.get_mut(layout.string_table.start).unwrap() = 0;
+    patch_byte(&mut bytes, layout.string_table.start, 0);
     (layout, bytes)
 }
 
@@ -247,6 +243,20 @@ fn v2_directory_layout_matches_reference_with_and_without_uuid() {
 }
 
 #[test]
+fn v2_write_layout_matches_reference_offsets() {
+    let header = v2::Header {
+        address_offset_size: 8,
+        string_table_encoding: 0,
+        base_address: 0,
+        address_count: 3,
+    };
+    let layout = header.write_layout(20, 2, 17, 91).unwrap();
+    assert_eq!(layout.directory_end, 160);
+    assert_eq!(layout.uuid, Some(160..180));
+    assert_eq!(layout.directory.len(), 6);
+}
+
+#[test]
 fn v2_directory_rejects_reference_errors_and_structural_corruption() {
     let endian = Endian::Little;
     let header = v2::Header {
@@ -258,7 +268,7 @@ fn v2_directory_rejects_reference_errors_and_structural_corruption() {
     let (layout, bytes) = encoded_directory(endian, &header, 0, 1, 6, 16);
 
     for length in 0..layout.directory_end {
-        assert!(v2::parse_directory(bytes.get(..length).unwrap(), endian, &header).is_err());
+        assert!(v2::parse_directory(bytes.split_at(length).0, endian, &header).is_err());
     }
 
     let mut duplicate = Encoder::new(endian);
@@ -281,7 +291,7 @@ fn v2_directory_rejects_reference_errors_and_structural_corruption() {
 
     let mut missing = Encoder::new(endian);
     missing.write_bytes(&header.encode(endian).unwrap());
-    for entry in layout.directory.get(..layout.directory.len() - 1).unwrap() {
+    for entry in layout.directory.split_at(layout.directory.len() - 1).0 {
         entry.encode_into(&mut missing);
     }
     v2::GlobalData {
@@ -299,37 +309,30 @@ fn v2_directory_rejects_reference_errors_and_structural_corruption() {
 
     let mut zero_sized = bytes.clone();
     let first_size = v2::HEADER_SIZE + 12;
-    zero_sized
-        .get_mut(first_size..first_size + 8)
-        .unwrap()
-        .fill(0);
+    patch_bytes(&mut zero_sized, first_size, &[0; 8]);
     assert!(matches!(
         v2::parse_directory(&zero_sized, endian, &header),
         Err(Error::ZeroSizedSection { .. })
     ));
 
     let mut outside = bytes.clone();
-    outside
-        .get_mut(first_size..first_size + 8)
-        .unwrap()
-        .copy_from_slice(&u64::MAX.to_le_bytes());
+    patch_bytes(&mut outside, first_size, &u64::MAX.to_le_bytes());
     assert!(v2::parse_directory(&outside, endian, &header).is_err());
 
     let mut overlapping = bytes.clone();
     let function_entry = v2::HEADER_SIZE + 4 * v2::GLOBAL_DATA_SIZE;
-    overlapping
-        .get_mut(function_entry + 4..function_entry + 12)
-        .unwrap()
-        .copy_from_slice(
-            &u64::try_from(layout.file_table.start)
-                .unwrap()
-                .to_le_bytes(),
-        );
+    patch_bytes(
+        &mut overlapping,
+        function_entry + 4,
+        &u64::try_from(layout.file_table.start)
+            .unwrap()
+            .to_le_bytes(),
+    );
     assert!(v2::parse_directory(&overlapping, endian, &header).is_err());
 
     let mut bad_terminator = bytes;
     let terminator_offset = layout.directory_end - v2::GLOBAL_DATA_SIZE;
-    *bad_terminator.get_mut(terminator_offset + 4).unwrap() = 1;
+    patch_byte(&mut bad_terminator, terminator_offset + 4, 1);
     assert!(v2::parse_directory(&bad_terminator, endian, &header).is_err());
 }
 

@@ -64,12 +64,12 @@ pub(crate) fn write_builder(builder: GsymBuilder, mut output: impl Write) -> Res
 }
 
 fn encode_builder(builder: GsymBuilder) -> Result<encode::EncodedImage> {
-    let (options, files, functions) = builder.into_parts();
+    let (options, function_set, files, functions) = builder.into_parts();
     validate_file_table(&files)?;
     for function in &functions {
         validate_for_writer(function, files.len())?;
     }
-    let functions = finalize(functions, &options);
+    let functions = finalize(functions, &options, function_set);
     let first = functions
         .first()
         .ok_or(Error::InvalidModel("at least one function is required"))?;

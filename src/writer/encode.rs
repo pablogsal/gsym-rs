@@ -12,7 +12,6 @@ pub(super) struct EncodedImage {
 
 impl EncodedImage {
     pub(super) fn into_bytes(mut self) -> Vec<u8> {
-        self.prefix.reserve_exact(self.function_info.len());
         self.prefix.extend_from_slice(&self.function_info);
         self.prefix
     }
@@ -78,7 +77,10 @@ pub(super) fn encode_v1(
         uuid: format::v1::FixedUuid::new(&options.build_id)?,
     };
 
-    let mut output = Encoder::with_capacity(options.endian, function_base);
+    let mut output = Encoder::with_capacity(
+        options.endian,
+        function_base.saturating_add(function_bytes.len()),
+    );
     output.write_bytes(&header.encode(options.endian)?);
     write_address_offsets(&mut output, functions, base, width)?;
     output.align_to(4)?;
@@ -123,7 +125,13 @@ pub(super) fn encode_v2(
         function_bytes.len(),
     )?;
 
-    let mut output = Encoder::with_capacity(options.endian, layout.function_info.start);
+    let mut output = Encoder::with_capacity(
+        options.endian,
+        layout
+            .function_info
+            .start
+            .saturating_add(function_bytes.len()),
+    );
     output.write_bytes(&header.encode(options.endian)?);
     for entry in &layout.directory {
         entry.encode_into(&mut output);

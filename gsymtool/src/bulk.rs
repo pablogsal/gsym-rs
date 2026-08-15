@@ -16,13 +16,14 @@ use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use gsym::convert::ElfConverter;
+use gsym::convert::{DiscoveryEvent, ElfConverter};
 
 use crate::cli::HumanBytes;
-use crate::terminal::{MUTED, Terminal};
+use crate::terminal::Terminal;
 use crate::{Count, Elapsed, persist_builder};
 
 const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
+const DEFAULT_MAX_WORKERS: usize = 8;
 
 /// What one `convert --output-dir` invocation asked for.
 #[derive(Clone, Copy, Debug)]
@@ -52,14 +53,18 @@ struct Plan {
 
 struct Converted {
     bytes: u64,
-    functions: usize,
     warnings: usize,
-    elapsed: Duration,
 }
 
 struct Outcome<'jobs> {
     job: &'jobs Job,
     result: Result<Option<Converted>>,
+}
+
+enum WorkerEvent<'jobs> {
+    Started(&'jobs Job),
+    Discovery(String),
+    Finished(Outcome<'jobs>),
 }
 
 #[derive(Debug, Default)]
@@ -84,6 +89,10 @@ pub(crate) fn run(
     terminal: &mut Terminal,
 ) -> Result<()> {
     let started = Instant::now();
+    terminal.status(format_args!(
+        "scanning {} for ELF files",
+        Plural(batch.inputs.len(), "input")
+    ))?;
     let plan = plan(batch)?;
     if plan.jobs.is_empty() {
         bail!("found no ELF files to convert");
@@ -94,6 +103,19 @@ pub(crate) fn run(
         .unwrap_or_else(available_jobs)
         .get()
         .min(plan.jobs.len());
+    terminal.status(format_args!(
+        "converting {} with {}",
+        Plural(plan.jobs.len(), "ELF file"),
+        Plural(workers, "worker")
+    ))?;
+    if converter.options().discovery == gsym::convert::DiscoveryPolicy::Enabled
+        && !converter.options().debuginfod_urls.is_empty()
+    {
+        terminal.status(format_args!(
+            "debuginfod enabled ({}); requests use the live progress line; pass --verbose to log each one or --no-discovery for local-only conversion",
+            converter.options().debuginfod_urls.join(", ")
+        ))?;
+    }
     let totals = execute(converter, &plan.jobs, workers, terminal)?;
     report_totals(&plan, &totals, started.elapsed(), terminal)?;
     if totals.failed != 0 {
@@ -107,7 +129,9 @@ pub(crate) fn run(
 }
 
 fn available_jobs() -> NonZeroUsize {
-    std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
+    std::thread::available_parallelism()
+        .unwrap_or(NonZeroUsize::MIN)
+        .min(NonZeroUsize::new(DEFAULT_MAX_WORKERS).unwrap_or(NonZeroUsize::MIN))
 }
 
 fn plan(batch: Batch<'_>) -> Result<Plan> {
@@ -238,8 +262,18 @@ fn execute(
         }
         drop(sender);
         let mut totals = Totals::default();
-        for outcome in receiver {
-            report(&outcome, &mut totals, terminal)?;
+        for event in receiver {
+            match event {
+                WorkerEvent::Started(job) => {
+                    terminal.progress(format_args!("converting {}", job.input.display()))?;
+                }
+                WorkerEvent::Discovery(message) => {
+                    terminal.activity(format_args!("debuginfod: {message}"))?;
+                }
+                WorkerEvent::Finished(outcome) => {
+                    report(&outcome, &mut totals, terminal, jobs.len())?;
+                }
+            }
         }
         Ok(totals)
     })
@@ -249,16 +283,19 @@ fn work<'jobs>(
     converter: &ElfConverter,
     jobs: &'jobs [Job],
     cursor: &AtomicUsize,
-    sender: &Sender<Outcome<'jobs>>,
+    sender: &Sender<WorkerEvent<'jobs>>,
 ) {
     loop {
         let index = cursor.fetch_add(1, Ordering::Relaxed);
         let Some(job) = jobs.get(index) else { break };
-        let outcome = Outcome {
-            job,
-            result: convert_one(converter, job)
-                .with_context(|| format!("failed to convert {}", job.input.display())),
-        };
+        if sender.send(WorkerEvent::Started(job)).is_err() {
+            break;
+        }
+        let result = convert_one(converter, job, |event| {
+            drop(sender.send(WorkerEvent::Discovery(discovery_message(event))));
+        })
+        .with_context(|| format!("failed to convert {}", job.input.display()));
+        let outcome = WorkerEvent::Finished(Outcome { job, result });
         if sender.send(outcome).is_err() {
             break;
         }
@@ -266,9 +303,12 @@ fn work<'jobs>(
 }
 
 /// Inputs rejected as empty or producing no functions are counted as skipped.
-fn convert_one(converter: &ElfConverter, job: &Job) -> Result<Option<Converted>> {
-    let started = Instant::now();
-    let report = match converter.convert_path(&job.input) {
+fn convert_one(
+    converter: &ElfConverter,
+    job: &Job,
+    observer: impl FnMut(DiscoveryEvent<'_>),
+) -> Result<Option<Converted>> {
+    let report = match converter.convert_path_with_observer(&job.input, observer) {
         Ok(report) => report,
         Err(error) if holds_nothing_to_convert(&error) => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -279,12 +319,23 @@ fn convert_one(converter: &ElfConverter, job: &Job) -> Result<Option<Converted>>
         return Ok(None);
     }
     let bytes = persist_builder(report.builder, &job.output)?;
-    Ok(Some(Converted {
-        bytes,
-        functions,
-        warnings,
-        elapsed: started.elapsed(),
-    }))
+    Ok(Some(Converted { bytes, warnings }))
+}
+
+fn discovery_message(event: DiscoveryEvent<'_>) -> String {
+    match event {
+        DiscoveryEvent::DebuginfodRequest {
+            artifact,
+            build_id,
+            endpoint,
+            related_path,
+        } => format!(
+            "requesting {artifact} for {} (build ID {build_id}) from {}/buildid/{build_id}/debuginfo",
+            related_path.display(),
+            endpoint.trim_end_matches('/')
+        ),
+        _ => "performing debug-info discovery".to_owned(),
+    }
 }
 
 const fn holds_nothing_to_convert(error: &gsym::Error) -> bool {
@@ -292,29 +343,34 @@ const fn holds_nothing_to_convert(error: &gsym::Error) -> bool {
 }
 
 /// Per-file warnings are counted rather than printed to keep failures visible.
-fn report(outcome: &Outcome<'_>, totals: &mut Totals, terminal: &mut Terminal) -> Result<()> {
+fn report(
+    outcome: &Outcome<'_>,
+    totals: &mut Totals,
+    terminal: &mut Terminal,
+    total: usize,
+) -> Result<()> {
     match &outcome.result {
         Ok(None) => totals.empty = totals.empty.saturating_add(1),
         Ok(Some(converted)) => {
             totals.converted = totals.converted.saturating_add(1);
             totals.warnings = totals.warnings.saturating_add(converted.warnings);
             totals.bytes = totals.bytes.saturating_add(converted.bytes);
-            terminal.success(format_args!(
-                "{} {MUTED}->{} {} ({}, {}{}, {})",
-                outcome.job.input.display(),
-                MUTED.render_reset(),
-                outcome.job.output.display(),
-                HumanBytes(converted.bytes),
-                Plural(converted.functions, "function"),
-                Warnings(converted.warnings),
-                Elapsed(converted.elapsed),
-            ))?;
         }
         Err(error) => {
             totals.failed = totals.failed.saturating_add(1);
             terminal.error(error)?;
         }
     }
+    let completed = totals
+        .converted
+        .saturating_add(totals.empty)
+        .saturating_add(totals.failed);
+    terminal.progress(format_args!(
+        "finished {} of {} ELF files; latest: {}",
+        Count(completed),
+        Count(total),
+        outcome.job.input.display()
+    ))?;
     Ok(())
 }
 
@@ -379,17 +435,6 @@ impl fmt::Display for Plural {
     }
 }
 
-struct Warnings(usize);
-
-impl fmt::Display for Warnings {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 == 0 {
-            return Ok(());
-        }
-        write!(formatter, ", {}", Plural(self.0, "warning"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,17 +446,15 @@ mod tests {
     }
 
     #[test]
-    fn renders_a_warning_count_only_when_there_is_one() {
-        assert_eq!(Warnings(0).to_string(), "");
-        assert_eq!(Warnings(1).to_string(), ", 1 warning");
-        assert_eq!(Warnings(2_500).to_string(), ", 2,500 warnings");
-    }
-
-    #[test]
     fn pluralizes_every_count_but_one() {
         assert_eq!(Plural(0, "function").to_string(), "0 functions");
         assert_eq!(Plural(1, "function").to_string(), "1 function");
         assert_eq!(Plural(12_000, "function").to_string(), "12,000 functions");
+    }
+
+    #[test]
+    fn default_worker_count_is_bounded() {
+        assert!(available_jobs().get() <= DEFAULT_MAX_WORKERS);
     }
 
     #[test]

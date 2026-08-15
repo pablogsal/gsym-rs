@@ -1,28 +1,40 @@
 use crate::error::Result;
-use crate::format::function::{EncodedFunction, EncodedInlineNode};
+use crate::format::function::{EncodedFunction, EncodedInlineNode, check_merged_depth};
 use crate::model::{CallSite, Function, InlineNode};
 
 use super::function::FunctionRef;
 
-pub(super) fn validate<D: AsRef<[u8]>>(
-    gsym: &super::Gsym<D>,
+pub(super) fn validate(reference: &FunctionRef<'_>, function: &EncodedFunction) -> Result<()> {
+    validate_at(reference, function, None, 0)
+}
+
+fn validate_at(
+    reference: &FunctionRef<'_>,
     function: &EncodedFunction,
+    merged_parent: Option<crate::AddressRange>,
+    depth: usize,
 ) -> Result<()> {
-    validate_semantics(function, None)?;
-    let _ = gsym.string(function.name)?;
+    check_merged_depth(depth)?;
+    validate_semantics(function, merged_parent)?;
+    let _ = reference.string(function.name)?;
     for line in function.lines.iter().flatten() {
-        let _ = gsym.file(line.file)?;
+        let _ = reference.file(line.file)?;
     }
     if let Some(node) = &function.inline {
-        validate_inline(gsym, node)?;
+        validate_inline(reference, node)?;
     }
     for site in &function.call_sites {
         for offset in &site.match_regex {
-            let _ = gsym.string(*offset)?;
+            let _ = reference.string(*offset)?;
         }
     }
     for merged in &function.merged {
-        validate(gsym, merged)?;
+        validate_at(
+            reference,
+            merged,
+            Some(function.range),
+            depth.saturating_add(1),
+        )?;
     }
     Ok(())
 }
@@ -60,9 +72,6 @@ fn validate_semantics(
             "call-site return offset is outside its function",
         ));
     }
-    for merged in &function.merged {
-        validate_semantics(merged, Some(function.range))?;
-    }
     Ok(())
 }
 
@@ -84,23 +93,38 @@ fn validate_inline_ranges(node: &EncodedInlineNode, parents: &[crate::AddressRan
     Ok(())
 }
 
-fn validate_inline<D: AsRef<[u8]>>(gsym: &super::Gsym<D>, node: &EncodedInlineNode) -> Result<()> {
+fn validate_inline(reference: &FunctionRef<'_>, node: &EncodedInlineNode) -> Result<()> {
     if node.name != 0 {
-        let _ = gsym.string(node.name)?;
+        let _ = reference.string(node.name)?;
     }
-    let _ = gsym.file(node.call_file)?;
+    let _ = reference.file(node.call_file.into())?;
     for child in &node.children {
-        validate_inline(gsym, child)?;
+        validate_inline(reference, child)?;
     }
     Ok(())
 }
 
 pub(super) fn decode(reference: &FunctionRef<'_>, encoded: EncodedFunction) -> Result<Function> {
+    decode_at(reference, encoded, None, 0)
+}
+
+fn decode_at(
+    reference: &FunctionRef<'_>,
+    encoded: EncodedFunction,
+    merged_parent: Option<crate::AddressRange>,
+    depth: usize,
+) -> Result<Function> {
+    check_merged_depth(depth)?;
+    validate_semantics(&encoded, merged_parent)?;
+    for line in encoded.lines.iter().flatten() {
+        let _ = reference.file(line.file)?;
+    }
+    let range = encoded.range;
     let resolve = |offset| reference.string(offset).map(<[u8]>::to_vec);
     let merged = encoded
         .merged
         .into_iter()
-        .map(|item| decode(reference, item))
+        .map(|item| decode_at(reference, item, Some(range), depth.saturating_add(1)))
         .collect::<Result<_>>()?;
     let call_sites = encoded
         .call_sites
@@ -117,9 +141,6 @@ pub(super) fn decode(reference: &FunctionRef<'_>, encoded: EncodedFunction) -> R
             })
         })
         .collect::<Result<_>>()?;
-    for line in encoded.lines.iter().flatten() {
-        let _ = reference.file(line.file)?;
-    }
     Ok(Function {
         range: encoded.range,
         name: resolve(encoded.name)?,

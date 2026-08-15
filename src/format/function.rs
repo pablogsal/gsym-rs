@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use crate::endian::{Cursor, Encoder, Endian};
 use crate::error::{Error, Result};
 use crate::format::{INFO_CALL_SITE, INFO_END, INFO_INLINE, INFO_LINE_TABLE, INFO_MERGED};
@@ -6,7 +8,31 @@ use crate::model::{AddressRange, LineEntry};
 use super::leb::{read_uleb, write_uleb};
 use super::line;
 
-const MAX_INLINE_DEPTH: usize = 256;
+pub(crate) const MAX_INLINE_DEPTH: usize = 256;
+
+pub(crate) const MAX_MERGED_DEPTH: usize = 16;
+
+pub(crate) const fn check_inline_depth(depth: usize) -> Result<()> {
+    if depth > MAX_INLINE_DEPTH {
+        return Err(Error::Limit {
+            context: "inline tree depth",
+            value: depth as u64,
+            limit: MAX_INLINE_DEPTH as u64,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) const fn check_merged_depth(depth: usize) -> Result<()> {
+    if depth > MAX_MERGED_DEPTH {
+        return Err(Error::Limit {
+            context: "merged-function tree depth",
+            value: depth as u64,
+            limit: MAX_MERGED_DEPTH as u64,
+        });
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InfoType {
@@ -115,20 +141,31 @@ pub(crate) fn decode(
     string_offset_size: u8,
     base: u64,
 ) -> Result<EncodedFunction> {
-    validate_string_offset_size(string_offset_size)?;
+    let _ = string_offset_width(string_offset_size)?;
     let mut cursor = Cursor::new(bytes, endian);
-    decode_from(&mut cursor, string_offset_size, base)
+    decode_from(&mut cursor, string_offset_size, base, 0)
 }
 
+#[cfg(test)]
 pub(crate) fn decode_exact(
     bytes: &[u8],
     endian: Endian,
     string_offset_size: u8,
     base: u64,
 ) -> Result<EncodedFunction> {
-    validate_string_offset_size(string_offset_size)?;
+    decode_exact_at(bytes, endian, string_offset_size, base, 0)
+}
+
+fn decode_exact_at(
+    bytes: &[u8],
+    endian: Endian,
+    string_offset_size: u8,
+    base: u64,
+    depth: usize,
+) -> Result<EncodedFunction> {
+    let _ = string_offset_width(string_offset_size)?;
     let mut cursor = Cursor::new(bytes, endian);
-    let function = decode_from(&mut cursor, string_offset_size, base)?;
+    let function = decode_from(&mut cursor, string_offset_size, base, depth)?;
     if !cursor.is_empty() {
         return Err(Error::InvalidFormat(
             "bytes remain after the FunctionInfo end marker",
@@ -141,8 +178,10 @@ pub(crate) fn decode_from(
     cursor: &mut Cursor<'_>,
     string_offset_size: u8,
     base: u64,
+    depth: usize,
 ) -> Result<EncodedFunction> {
-    validate_string_offset_size(string_offset_size)?;
+    check_merged_depth(depth)?;
+    let _ = string_offset_width(string_offset_size)?;
     let size = u64::from(cursor.read_u32()?);
     let name = cursor.read_uint(string_offset_size)?;
     if name == 0 {
@@ -179,8 +218,13 @@ pub(crate) fn decode_from(
                 function.inline = Some(inline);
             }
             InfoType::Merged => {
-                function.merged =
-                    decode_merged(record.payload, cursor.endian(), string_offset_size, base)?;
+                function.merged = decode_merged(
+                    record.payload,
+                    cursor.endian(),
+                    string_offset_size,
+                    base,
+                    depth.saturating_add(1),
+                )?;
             }
             InfoType::CallSite => {
                 function.call_sites =
@@ -209,7 +253,18 @@ pub(crate) fn encode_into(
     string_offset_size: u8,
     align: bool,
 ) -> Result<usize> {
-    validate_string_offset_size(string_offset_size)?;
+    encode_into_at(function, output, string_offset_size, align, 0)
+}
+
+fn encode_into_at(
+    function: &EncodedFunction,
+    output: &mut Encoder,
+    string_offset_size: u8,
+    align: bool,
+    depth: usize,
+) -> Result<usize> {
+    check_merged_depth(depth)?;
+    let _ = string_offset_width(string_offset_size)?;
     if align {
         output.align_to(4)?;
     }
@@ -245,6 +300,7 @@ pub(crate) fn encode_into(
                 output,
                 string_offset_size,
                 function.range.start,
+                depth.saturating_add(1),
             )
         })?;
     }
@@ -280,16 +336,14 @@ fn write_record(
     output.patch_u32(length_offset, payload_len)
 }
 
-fn validate_string_offset_size(size: u8) -> Result<()> {
-    if matches!(size, 1 | 2 | 4 | 8) {
-        Ok(())
-    } else {
-        Err(Error::OutOfRange {
+fn string_offset_width(size: u8) -> Result<NonZeroUsize> {
+    NonZeroUsize::new(usize::from(size))
+        .filter(|width| matches!(width.get(), 1 | 2 | 4 | 8))
+        .ok_or_else(|| Error::OutOfRange {
             field: "string offset size",
             value: u64::from(size),
             max: 8,
         })
-    }
 }
 
 fn decode_ranges(cursor: &mut Cursor<'_>, base: u64) -> Result<Vec<AddressRange>> {
@@ -354,9 +408,7 @@ fn decode_inline(
     base: u64,
     depth: usize,
 ) -> Result<EncodedInlineNode> {
-    if depth > MAX_INLINE_DEPTH {
-        return Err(Error::InvalidFormat("inline tree exceeds maximum depth"));
-    }
+    check_inline_depth(depth)?;
     let ranges = decode_ranges(cursor, base)?;
     if ranges.is_empty() {
         return Ok(EncodedInlineNode::default());
@@ -421,9 +473,7 @@ fn encode_inline(
     base: u64,
     depth: usize,
 ) -> Result<()> {
-    if depth > MAX_INLINE_DEPTH {
-        return Err(Error::InvalidModel("inline tree exceeds maximum depth"));
-    }
+    check_inline_depth(depth)?;
     if node.ranges.is_empty() {
         return Err(Error::InvalidModel("inline node must contain a range"));
     }
@@ -469,6 +519,7 @@ fn decode_merged(
     endian: Endian,
     string_offset_size: u8,
     base: u64,
+    depth: usize,
 ) -> Result<Vec<EncodedFunction>> {
     let mut cursor = Cursor::new(bytes, endian);
     let count = usize::try_from(cursor.read_u32()?)
@@ -483,7 +534,13 @@ fn decode_merged(
         let length = usize::try_from(cursor.read_u32()?)
             .map_err(|_| Error::Overflow("merged FunctionInfo length"))?;
         let data = cursor.take(length)?;
-        functions.push(decode_exact(data, endian, string_offset_size, base)?);
+        functions.push(decode_exact_at(
+            data,
+            endian,
+            string_offset_size,
+            base,
+            depth,
+        )?);
     }
     if !cursor.is_empty() {
         return Err(Error::InvalidFormat("trailing merged-function bytes"));
@@ -496,6 +553,7 @@ fn encode_merged_into(
     output: &mut Encoder,
     string_offset_size: u8,
     base: u64,
+    depth: usize,
 ) -> Result<()> {
     output.write_u32(u32::try_from(functions.len()).map_err(|_| Error::Limit {
         context: "merged-function count",
@@ -511,7 +569,7 @@ fn encode_merged_into(
         let length_offset = output.len();
         output.write_u32(0);
         let function_offset = output.len();
-        encode_into(function, output, string_offset_size, false)?;
+        encode_into_at(function, output, string_offset_size, false, depth)?;
         let function_len = output
             .len()
             .checked_sub(function_offset)
@@ -546,12 +604,7 @@ fn decode_call_sites(
         let flags = cursor.read_u8()?;
         let regex_count = usize::try_from(cursor.read_u32()?)
             .map_err(|_| Error::Overflow("call-site regex count"))?;
-        if regex_count
-            > cursor
-                .remaining()
-                .checked_div(usize::from(string_offset_size))
-                .unwrap_or(0)
-        {
+        if regex_count > cursor.remaining() / string_offset_width(string_offset_size)? {
             return Err(Error::InvalidFormat(
                 "call-site regex count exceeds remaining input",
             ));
@@ -597,85 +650,4 @@ fn encode_call_sites_into(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::endian::Endian;
-    use crate::model::{AddressRange, LineEntry};
-
-    use super::{EncodedCallSite, EncodedFunction, EncodedInlineNode, decode_exact, encode};
-
-    fn rich_function() -> EncodedFunction {
-        EncodedFunction {
-            range: AddressRange::new(0x1000, 0x1040),
-            name: 1,
-            lines: Some(vec![
-                LineEntry {
-                    address: 0x1000,
-                    file: 1.into(),
-                    line: 10,
-                },
-                LineEntry {
-                    address: 0x1010,
-                    file: 2.into(),
-                    line: 12,
-                },
-            ]),
-            inline: Some(EncodedInlineNode {
-                ranges: vec![AddressRange::new(0x1000, 0x1040)],
-                name: 1,
-                call_file: 0,
-                call_line: 0,
-                children: vec![EncodedInlineNode {
-                    ranges: vec![AddressRange::new(0x1010, 0x1020)],
-                    name: 5,
-                    call_file: 2,
-                    call_line: 22,
-                    children: Vec::new(),
-                }],
-            }),
-            merged: vec![EncodedFunction {
-                range: AddressRange::new(0x1000, 0x1040),
-                name: 9,
-                ..EncodedFunction::default()
-            }],
-            call_sites: vec![EncodedCallSite {
-                return_offset: 0x18,
-                flags: 1,
-                match_regex: vec![13, 21],
-            }],
-        }
-    }
-
-    #[test]
-    fn all_records_round_trip_for_both_versions_and_endians() {
-        let expected = rich_function();
-        for endian in [Endian::Little, Endian::Big] {
-            for string_offset_size in [4, 8] {
-                let bytes = encode(&expected, endian, string_offset_size).unwrap();
-                let actual = decode_exact(&bytes, endian, string_offset_size, 0x1000).unwrap();
-                assert_eq!(actual, expected);
-            }
-        }
-    }
-
-    #[test]
-    fn function_info_minimal_bytes_match_wire_layout() {
-        let function = EncodedFunction {
-            range: AddressRange::new(0x1000, 0x1100),
-            name: 1,
-            ..EncodedFunction::default()
-        };
-        let bytes = encode(&function, Endian::Little, 4).unwrap();
-        assert_eq!(
-            bytes,
-            [
-                0x00, 0x01, 0x00, 0x00, // Size
-                0x01, 0x00, 0x00, 0x00, // Name
-                0x00, 0x00, 0x00, 0x00, // EndOfList
-                0x00, 0x00, 0x00, 0x00, // zero length
-            ]
-        );
-    }
 }

@@ -9,6 +9,19 @@ use crate::validation::validate_for_builder;
 use crate::writer::WriterOptions;
 use crate::{Error, GsymVersion, Result};
 
+/// How finalization treats functions that share an address range.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FunctionSetPolicy {
+    /// Keep the richest record of each equal-range group.
+    #[default]
+    Deduplicate,
+    /// Keep equal-range aliases as `MergedFunctionsInfo` records.
+    MergeEqualRanges,
+    /// Encode every function as supplied.
+    Preserve,
+}
+
 /// Finalization policy used by [`GsymBuilder`].
 ///
 /// [`Default`] enables `repair_zero_sized_functions` and disables
@@ -94,6 +107,7 @@ impl Default for BuilderOptions {
 /// ```
 pub struct GsymBuilder {
     options: BuilderOptions,
+    function_set: FunctionSetPolicy,
     files: Vec<FileEntry>,
     file_index: HashTable<FileSlot>,
     hasher: RandomState,
@@ -141,6 +155,7 @@ impl GsymBuilder {
         file_index.insert_unique(slot.hash, slot, |slot| slot.hash);
         Self {
             options: BuilderOptions::default(),
+            function_set: FunctionSetPolicy::Deduplicate,
             files: vec![empty],
             file_index,
             hasher,
@@ -152,6 +167,11 @@ impl GsymBuilder {
     #[must_use]
     pub fn with_options(options: BuilderOptions) -> Self {
         let mut builder = Self::new();
+        builder.function_set = if options.merge_equal_address_functions {
+            FunctionSetPolicy::MergeEqualRanges
+        } else {
+            FunctionSetPolicy::Deduplicate
+        };
         builder.options = options;
         builder
     }
@@ -206,11 +226,31 @@ impl GsymBuilder {
         self
     }
 
+    /// Selects how functions sharing an address range are finalized.
+    #[must_use]
+    pub const fn function_set(mut self, policy: FunctionSetPolicy) -> Self {
+        self.options.merge_equal_address_functions =
+            matches!(policy, FunctionSetPolicy::MergeEqualRanges);
+        self.function_set = policy;
+        self
+    }
+
     /// Enables or disables merged records for equal-address functions.
     #[must_use]
     pub const fn merge_equal_address_functions(mut self, enabled: bool) -> Self {
         self.options.merge_equal_address_functions = enabled;
+        self.function_set = if enabled {
+            FunctionSetPolicy::MergeEqualRanges
+        } else {
+            FunctionSetPolicy::Deduplicate
+        };
         self
+    }
+
+    /// Returns how equal-range functions will be finalized.
+    #[must_use]
+    pub const fn function_set_policy(&self) -> FunctionSetPolicy {
+        self.function_set
     }
 
     /// Replaces the executable ranges used for liveness and size repair.
@@ -306,7 +346,14 @@ impl GsymBuilder {
         crate::writer::encode_builder_to_bytes(self)
     }
 
-    pub(crate) fn into_parts(self) -> (BuilderOptions, Vec<FileEntry>, Vec<Function>) {
-        (self.options, self.files, self.functions)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        BuilderOptions,
+        FunctionSetPolicy,
+        Vec<FileEntry>,
+        Vec<Function>,
+    ) {
+        (self.options, self.function_set, self.files, self.functions)
     }
 }

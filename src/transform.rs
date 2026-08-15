@@ -1,22 +1,21 @@
 use std::fmt;
 
+use crate::format::function::{check_inline_depth, check_merged_depth};
 use crate::{
-    Endian, Error, FileEntry, FileIndex, Function, Gsym, GsymBuilder, GsymVersion, InlineNode,
-    Result,
+    Endian, Error, FileEntry, FileIndex, Function, FunctionSetPolicy, Gsym, GsymBuilder,
+    GsymVersion, InlineNode, Result,
 };
 
 impl<D: AsRef<[u8]>> Gsym<D> {
     /// Decodes every file and function into an owned semantic model.
     ///
-    /// A record type this crate cannot represent is an error rather than a
-    /// silent drop.
-    ///
-    /// This decodes and validates the whole file, so it costs about as much as
-    /// [`Self::verify`].
+    /// A record type this crate cannot represent is rejected to prevent a
+    /// lossy transformation.
     ///
     /// # Errors
     ///
-    /// Returns the first structural, reference, or semantic decoding error.
+    /// Returns the first structural, reference, or semantic decoding error,
+    /// including a file table whose reserved entry zero is not empty.
     pub fn decode_all(&self) -> Result<DecodedGsym> {
         let (report, functions) = self.decode_all_verified()?;
         let header = self.header();
@@ -59,10 +58,10 @@ impl<D: AsRef<[u8]>> Gsym<D> {
 /// semantic fields when needed, then use [`Self::into_builder`] or
 /// [`Self::transcode`] to move the model into a new encoding.
 ///
-/// Decoding is all-or-nothing: a record type this crate cannot represent is an
-/// error rather than a silent drop. `source_version` and `source_endian` record
-/// what the input used, and [`TranscodeOptions`] overrides either one for the
-/// output.
+/// A `FunctionInfo` record of a type this crate does not model makes decoding
+/// fail rather than silently disappearing during re-encoding. `source_version`
+/// and `source_endian` record what the input used, and [`TranscodeOptions`]
+/// overrides either one for the output.
 ///
 /// File indices in the model refer to [`Self::files`], including the reserved
 /// empty entry at index zero. Re-encoding renumbers the table and keeps only
@@ -135,7 +134,8 @@ pub struct TranscodeOptions {
 pub struct GsymSegment {
     /// Lowest function start address in this segment.
     pub first_address: u64,
-    /// Exclusive maximum function end address in this segment.
+    /// Exclusive end of this segment's span, equal to the next segment's
+    /// [`first_address`](Self::first_address).
     pub end_address: u64,
     /// Number of top-level functions in this segment.
     pub function_count: usize,
@@ -195,25 +195,14 @@ impl DecodedGsym {
             files,
             functions,
         } = self;
-        if files
-            .first()
-            .is_none_or(|file| *file != FileEntry::default())
-        {
-            return Err(Error::InvalidModel("file-table index zero must be empty"));
-        }
-        let mut used = vec![false; files.len()];
-        if let Some(zero) = used.first_mut() {
-            *zero = true;
-        }
-        for function in &functions {
-            mark_function_files(function, &mut used)?;
-        }
-        let mut builder = GsymBuilder::new()
-            .version(options.version.unwrap_or(source_version))
-            .endian(options.endian.unwrap_or(source_endian))
-            .base_address(base_address)
-            .build_id(build_id)
-            .repair_zero_sized_functions(false);
+        let used = used_files(&files, &functions)?;
+        let mut builder = new_builder(
+            source_version,
+            source_endian,
+            base_address,
+            build_id,
+            options,
+        );
         let mut remap = vec![FileIndex::ZERO; files.len()];
         for (old, file) in files.into_iter().enumerate().skip(1) {
             if used.get(old).copied().unwrap_or(false)
@@ -270,10 +259,13 @@ impl DecodedGsym {
     /// selected from exact encoded sizes, so all multi-function shards are at
     /// most the requested target.
     ///
-    /// Each shard covers a contiguous address span, so
+    /// Shards are ordered by address and their `[first_address, end_address)`
+    /// spans tile the covered range without a gap, so
     /// [`GsymSegment::first_address`] and [`GsymSegment::end_address`] are
-    /// enough to route an address to a shard. Segmentation is considerably more
-    /// expensive than a single encode.
+    /// enough to route an address to a shard: the shard whose span holds an
+    /// address is the shard that resolves it, and an address below the first
+    /// shard resolves nowhere, exactly as in the unsplit file. Segmentation is
+    /// considerably more expensive than a single encode.
     ///
     /// # Errors
     ///
@@ -296,8 +288,6 @@ impl DecodedGsym {
         let mut start = 0;
         while start < functions.len() {
             let minimum = start.saturating_add(1);
-            let mut low = minimum;
-            let mut high = functions.len();
             let mut best = minimum;
             let window = |end: usize| {
                 functions
@@ -307,12 +297,32 @@ impl DecodedGsym {
             let mut best_bytes = self
                 .builder_for_functions(window(best)?.iter().copied(), options)?
                 .to_bytes()?;
-            while low <= high {
+            let mut ceiling = functions.len().saturating_add(1);
+            let mut span = 1_usize;
+            while best < functions.len() {
+                let candidate = minimum.saturating_add(span).min(functions.len());
+                if candidate <= best {
+                    break;
+                }
+                let bytes = self
+                    .builder_for_functions(window(candidate)?.iter().copied(), options)?
+                    .to_bytes()?;
+                if bytes.len() > target_size {
+                    ceiling = candidate;
+                    break;
+                }
+                best = candidate;
+                best_bytes = bytes;
+                span = span.saturating_mul(2);
+            }
+            let mut low = best.saturating_add(1);
+            let mut high = ceiling.saturating_sub(1);
+            while low <= high && high <= functions.len() {
                 let middle = low.saturating_add(high.saturating_sub(low) / 2);
                 let bytes = self
                     .builder_for_functions(window(middle)?.iter().copied(), options)?
                     .to_bytes()?;
-                if bytes.len() <= target_size || middle == minimum {
+                if bytes.len() <= target_size {
                     best = middle;
                     best_bytes = bytes;
                     low = middle.saturating_add(1);
@@ -324,13 +334,20 @@ impl DecodedGsym {
             let first = selected
                 .first()
                 .ok_or(Error::InvalidModel("segment partition is empty"))?;
+            let last = selected
+                .last()
+                .ok_or(Error::InvalidModel("segment partition is empty"))?;
             segments.push(GsymSegment {
                 first_address: first.range.start,
-                end_address: selected
-                    .iter()
-                    .map(|function| function.range.end)
-                    .max()
-                    .unwrap_or(first.range.end),
+                end_address: match functions.get(best) {
+                    Some(next) => next.range.start,
+                    None if last.range.is_empty() => u64::MAX,
+                    None => selected
+                        .iter()
+                        .map(|function| function.range.end)
+                        .max()
+                        .unwrap_or(first.range.end),
+                },
                 function_count: selected.len(),
                 bytes: best_bytes.into_boxed_slice(),
             });
@@ -344,26 +361,14 @@ impl DecodedGsym {
         functions: impl Clone + IntoIterator<Item = &'function Function>,
         options: TranscodeOptions,
     ) -> Result<GsymBuilder> {
-        if self
-            .files
-            .first()
-            .is_none_or(|file| *file != FileEntry::default())
-        {
-            return Err(Error::InvalidModel("file-table index zero must be empty"));
-        }
-        let mut used = vec![false; self.files.len()];
-        if let Some(zero) = used.first_mut() {
-            *zero = true;
-        }
-        for function in functions.clone() {
-            mark_function_files(function, &mut used)?;
-        }
-        let mut builder = GsymBuilder::new()
-            .version(options.version.unwrap_or(self.source_version))
-            .endian(options.endian.unwrap_or(self.source_endian))
-            .base_address(self.base_address)
-            .build_id(self.build_id.clone())
-            .repair_zero_sized_functions(false);
+        let used = used_files(&self.files, functions.clone())?;
+        let mut builder = new_builder(
+            self.source_version,
+            self.source_endian,
+            self.base_address,
+            self.build_id.clone(),
+            options,
+        );
         let mut remap = vec![FileIndex::ZERO; self.files.len()];
         for (old, file) in self.files.iter().enumerate().skip(1) {
             if used.get(old).copied().unwrap_or(false)
@@ -381,6 +386,42 @@ impl DecodedGsym {
     }
 }
 
+fn used_files<'function>(
+    files: &[FileEntry],
+    functions: impl IntoIterator<Item = &'function Function>,
+) -> Result<Vec<bool>> {
+    if files
+        .first()
+        .is_none_or(|file| *file != FileEntry::default())
+    {
+        return Err(Error::InvalidModel("file-table index zero must be empty"));
+    }
+    let mut used = vec![false; files.len()];
+    if let Some(zero) = used.first_mut() {
+        *zero = true;
+    }
+    for function in functions {
+        mark_function_files(function, &mut used)?;
+    }
+    Ok(used)
+}
+
+fn new_builder(
+    source_version: GsymVersion,
+    source_endian: Endian,
+    base_address: u64,
+    build_id: Vec<u8>,
+    options: TranscodeOptions,
+) -> GsymBuilder {
+    GsymBuilder::new()
+        .version(options.version.unwrap_or(source_version))
+        .endian(options.endian.unwrap_or(source_endian))
+        .base_address(base_address)
+        .build_id(build_id)
+        .repair_zero_sized_functions(false)
+        .function_set(FunctionSetPolicy::Preserve)
+}
+
 fn mark_file(index: FileIndex, used: &mut [bool]) -> Result<()> {
     let slot = used
         .get_mut(index.get() as usize)
@@ -389,23 +430,29 @@ fn mark_file(index: FileIndex, used: &mut [bool]) -> Result<()> {
     Ok(())
 }
 
-fn mark_inline_files(node: &InlineNode, used: &mut [bool]) -> Result<()> {
+fn mark_inline_files(node: &InlineNode, used: &mut [bool], depth: usize) -> Result<()> {
+    check_inline_depth(depth)?;
     mark_file(node.call_file, used)?;
     for child in &node.children {
-        mark_inline_files(child, used)?;
+        mark_inline_files(child, used, depth.saturating_add(1))?;
     }
     Ok(())
 }
 
 fn mark_function_files(function: &Function, used: &mut [bool]) -> Result<()> {
+    mark_function_files_at(function, used, 0)
+}
+
+fn mark_function_files_at(function: &Function, used: &mut [bool], depth: usize) -> Result<()> {
+    check_merged_depth(depth)?;
     for line in &function.lines {
         mark_file(line.file, used)?;
     }
     if let Some(inline) = &function.inline {
-        mark_inline_files(inline, used)?;
+        mark_inline_files(inline, used, 0)?;
     }
     for merged in &function.merged {
-        mark_function_files(merged, used)?;
+        mark_function_files_at(merged, used, depth.saturating_add(1))?;
     }
     Ok(())
 }
@@ -417,23 +464,33 @@ fn remap_file(index: &mut FileIndex, remap: &[FileIndex]) -> Result<()> {
     Ok(())
 }
 
-fn remap_inline_files(node: &mut InlineNode, remap: &[FileIndex]) -> Result<()> {
+fn remap_inline_files(node: &mut InlineNode, remap: &[FileIndex], depth: usize) -> Result<()> {
+    check_inline_depth(depth)?;
     remap_file(&mut node.call_file, remap)?;
     for child in &mut node.children {
-        remap_inline_files(child, remap)?;
+        remap_inline_files(child, remap, depth.saturating_add(1))?;
     }
     Ok(())
 }
 
 fn remap_function_files(function: &mut Function, remap: &[FileIndex]) -> Result<()> {
+    remap_function_files_at(function, remap, 0)
+}
+
+fn remap_function_files_at(
+    function: &mut Function,
+    remap: &[FileIndex],
+    depth: usize,
+) -> Result<()> {
+    check_merged_depth(depth)?;
     for line in &mut function.lines {
         remap_file(&mut line.file, remap)?;
     }
     if let Some(inline) = &mut function.inline {
-        remap_inline_files(inline, remap)?;
+        remap_inline_files(inline, remap, 0)?;
     }
     for merged in &mut function.merged {
-        remap_function_files(merged, remap)?;
+        remap_function_files_at(merged, remap, depth.saturating_add(1))?;
     }
     Ok(())
 }

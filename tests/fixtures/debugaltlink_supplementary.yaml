@@ -1,0 +1,47 @@
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_EXEC
+  Machine: EM_X86_64
+Sections:
+  - Name: .note.gnu.build-id
+    Type: SHT_NOTE
+    Flags: [ SHF_ALLOC ]
+    Notes:
+      - Name: GNU
+        Desc: 0011223344556677889900112233445566778899
+        Type: NT_GNU_BUILD_ID
+DWARF:
+  debug_str:
+    - ''
+    - supplementary_origin
+  debug_abbrev:
+    - ID: 0
+      Table:
+        - Code: 0x1
+          Tag: DW_TAG_compile_unit
+          Children: DW_CHILDREN_yes
+          Attributes:
+            - Attribute: DW_AT_name
+              Form: DW_FORM_strp
+        - Code: 0x2
+          Tag: DW_TAG_subprogram
+          Children: DW_CHILDREN_no
+          Attributes:
+            - Attribute: DW_AT_name
+              Form: DW_FORM_strp
+  debug_info:
+    - Version: 4
+      AbbrevTableID: 0
+      AbbrOffset: 0x0
+      AddrSize: 8
+      Entries:
+        - AbbrCode: 0x1
+          Values:
+            - Value: 0x0
+        - AbbrCode: 0x2
+          Values:
+            - Value: 0x1
+        - AbbrCode: 0x0
+...

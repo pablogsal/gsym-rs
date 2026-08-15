@@ -248,7 +248,12 @@ fn import_unit<R: Reader<Offset = usize>>(
             let statement_sequence = statement_sequence_offset(unit, entry);
             let (mut function_lines, invalid_statement_sequence) =
                 unit_lines.for_range(candidate, statement_sequence);
-            if invalid_statement_sequence && let Some(sequence_offset) = statement_sequence {
+            if invalid_statement_sequence {
+                let Some(sequence_offset) = statement_sequence else {
+                    return Err(Error::InvalidModel(
+                        "line lookup rejected a statement sequence the subprogram does not request",
+                    ));
+                };
                 context
                     .warnings
                     .push(ConversionWarning::InvalidStatementSequence {
@@ -497,9 +502,12 @@ mod tests {
         };
         let (clamped, invalid) = lines.for_range(AddressRange::new(0x1010, 0x1030), Some(0x29));
         assert!(!invalid);
-        assert_eq!(clamped.first().unwrap().address, 0x1010);
-        assert_eq!(clamped.first().unwrap().line, 10);
-        assert_eq!(clamped.get(1).unwrap().address, 0x1020);
+        let [first, second, ..] = clamped.as_slice() else {
+            panic!("clamped range keeps at least two rows");
+        };
+        assert_eq!(first.address, 0x1010);
+        assert_eq!(first.line, 10);
+        assert_eq!(second.address, 0x1020);
         assert!(
             lines
                 .for_range(AddressRange::new(0x1800, 0x1810), None)

@@ -95,10 +95,7 @@ fn collect_descendants<R: Reader<Offset = usize>>(
             } else {
                 None
             };
-        let call_site = if context.include_call_sites
-            && depth == 0
-            && tag == gimli::constants::DW_TAG_call_site
-        {
+        let call_site = if context.include_call_sites && tag == gimli::constants::DW_TAG_call_site {
             make_call_site(context.dwarf, context.unit, entry, context.function_range)?
         } else {
             None
@@ -107,9 +104,7 @@ fn collect_descendants<R: Reader<Offset = usize>>(
             .as_ref()
             .map_or(parent_ranges, |inline| inline.ranges.as_slice());
         let nested = collect_descendants(context, child, nested_parent, depth.saturating_add(1))?;
-        if depth == 0 {
-            result.call_sites.extend(nested.call_sites);
-        }
+        result.call_sites.extend(nested.call_sites);
         result.inline_count = result.inline_count.saturating_add(nested.inline_count);
         if let Some(call_site) = call_site {
             result.call_sites.push(call_site);
@@ -203,6 +198,9 @@ fn make_call_site<R: Reader<Offset = usize>>(
     if !function_range.contains(return_pc) {
         return Ok(None);
     }
+    let Some(return_offset) = return_pc.checked_sub(function_range.start) else {
+        return Ok(None);
+    };
     let mut patterns = Vec::new();
     if let Some(origin) = entry.attr_value(gimli::constants::DW_AT_call_origin) {
         let mut visited = HashSet::new();
@@ -211,11 +209,7 @@ fn make_call_site<R: Reader<Offset = usize>>(
         }
     }
     Ok(Some(CallSite {
-        return_offset: return_pc
-            .checked_sub(function_range.start)
-            .ok_or(Error::InvalidModel(
-                "call-site return address precedes its function",
-            ))?,
+        return_offset,
         flags: CallSiteFlags::default(),
         match_regex: patterns,
     }))

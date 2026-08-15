@@ -198,7 +198,7 @@ contained by the parent's.
 A `u32` count followed by length-prefixed `FunctionInfo` records that share the
 parent's start address. These are the aliases that identical-code folding
 collapses onto one address. Writing them is opt-in through
-[`BuilderOptions::merge_equal_address_functions`](crate::BuilderOptions), which
+[`FunctionSetPolicy::MergeEqualRanges`](crate::FunctionSetPolicy), which
 matches `llvm-gsymutil`'s explicit merged-functions mode.
 
 ### Call sites (type 4)

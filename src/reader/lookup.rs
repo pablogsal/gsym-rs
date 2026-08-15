@@ -1,6 +1,6 @@
 use crate::endian::{Cursor, Endian};
 use crate::error::{Error, Result};
-use crate::format::function::InfoType;
+use crate::format::function::{InfoType, check_inline_depth};
 use crate::format::leb::read_uleb;
 use crate::format::line;
 use crate::model::{FileIndex, LineEntry, Lookup, LookupFrame};
@@ -379,14 +379,7 @@ fn scan_inline_node(
     depth: usize,
     scan: &mut InlineScan<'_>,
 ) -> Result<(bool, bool)> {
-    const MAX_DEPTH: usize = 256;
-    if depth > MAX_DEPTH {
-        return Err(Error::Limit {
-            context: "inline tree depth",
-            value: depth as u64,
-            limit: MAX_DEPTH as u64,
-        });
-    }
+    check_inline_depth(depth)?;
     let count = read_uleb(cursor)?;
     if count == 0 {
         return Ok((false, false));
