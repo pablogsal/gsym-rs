@@ -10,19 +10,18 @@ use gsym::convert::{
 use crate::elf::{convert, find_function};
 use crate::tools::{required_tool, run};
 
-fn convert_statement_sequence_fixture(value: &str) -> gsym::convert::ConversionReport {
+fn convert_yaml_with_text(
+    source: &str,
+    text_size: usize,
+    options: ConversionOptions,
+) -> gsym::convert::ConversionReport {
     let directory = tempfile::tempdir().unwrap();
-    let yaml = directory.path().join("statement-sequence.yaml");
-    let object = directory.path().join("statement-sequence");
+    let yaml = directory.path().join("fixture.yaml");
+    let object = directory.path().join("fixture");
     let text = directory.path().join("text.bin");
-    let image = directory.path().join("statement-sequence-with-text");
-    let source = include_str!("../fixtures/statement_sequence.yaml").replacen(
-        "- Value: 0x29",
-        &format!("- Value: {value}"),
-        1,
-    );
+    let image = directory.path().join("fixture-with-text");
     std::fs::write(&yaml, source).unwrap();
-    std::fs::write(&text, vec![0_u8; 0x100]).unwrap();
+    std::fs::write(&text, vec![0_u8; text_size]).unwrap();
     run(Command::new(required_tool("yaml2obj")).args([
         yaml.to_str().unwrap(),
         "-o",
@@ -40,9 +39,16 @@ fn convert_statement_sequence_fixture(value: &str) -> gsym::convert::ConversionR
             image.to_str().unwrap(),
         ]),
     );
-    ElfConverter::new(ConversionOptions::default())
-        .convert_path(&image)
-        .unwrap()
+    ElfConverter::new(options).convert_path(&image).unwrap()
+}
+
+fn convert_statement_sequence_fixture(value: &str) -> gsym::convert::ConversionReport {
+    let source = include_str!("../fixtures/statement_sequence.yaml").replacen(
+        "- Value: 0x29",
+        &format!("- Value: {value}"),
+        1,
+    );
+    convert_yaml_with_text(&source, 0x100, ConversionOptions::default())
 }
 
 /// The rows a converted `selected_sequence` carries, as `(address, line)`.
@@ -53,6 +59,42 @@ fn statement_sequence_lines(report: &gsym::convert::ConversionReport) -> Vec<(u6
         .iter()
         .map(|line| (line.address, line.line))
         .collect()
+}
+
+#[test]
+fn linker_tombstones_are_filtered_without_hiding_unexpected_ranges() {
+    let options = ConversionOptions {
+        include_symbols: false,
+        dwarf: Some(DwarfImportOptions {
+            inline_info: false,
+            ..DwarfImportOptions::default()
+        }),
+        ..ConversionOptions::default()
+    };
+
+    let report = convert_yaml_with_text(
+        include_str!("../fixtures/linker_tombstones.yaml"),
+        0x100,
+        options,
+    );
+
+    assert_eq!(report.stats.rejected_ranges, 4);
+    assert_eq!(report.stats.dwarf_functions, 1);
+    assert_eq!(
+        report
+            .builder
+            .functions()
+            .iter()
+            .map(|function| function.name.as_slice())
+            .collect::<Vec<_>>(),
+        [b"live".as_slice()]
+    );
+    assert_eq!(
+        report.warnings,
+        [ConversionWarning::RejectedRange {
+            range: gsym::AddressRange::new(0x3000, 0x3020),
+        }]
+    );
 }
 
 /// `DW_AT_LLVM_stmt_sequence` picks one of two sequences over the same code.
@@ -276,36 +318,16 @@ fn follows_abstract_origins_for_declaration_fallback() {
 
 #[test]
 fn invalid_declaration_file_indexes_warn_and_do_not_drop_functions() {
-    let directory = tempfile::tempdir().unwrap();
-    let yaml = directory.path().join("declaration-files.yaml");
-    let object = directory.path().join("declaration-files");
-    let text = directory.path().join("text.bin");
-    let image = directory.path().join("declaration-files-with-text");
-    std::fs::write(&yaml, include_str!("../fixtures/declaration_files.yaml")).unwrap();
-    std::fs::write(&text, vec![0_u8; 0x2100]).unwrap();
-    run(Command::new(required_tool("yaml2obj")).args([
-        yaml.to_str().unwrap(),
-        "-o",
-        object.to_str().unwrap(),
-    ]));
-    run(
-        Command::new(required_tool("x86_64-linux-gnu-objcopy")).args([
-            "--add-section",
-            &format!(".text={}", text.display()),
-            "--set-section-flags",
-            ".text=alloc,code,readonly",
-            "--change-section-address",
-            ".text=0x1000",
-            object.to_str().unwrap(),
-            image.to_str().unwrap(),
-        ]),
-    );
     let options = ConversionOptions {
         include_symbols: false,
         ..ConversionOptions::default()
     };
 
-    let report = ElfConverter::new(options).convert_path(&image).unwrap();
+    let report = convert_yaml_with_text(
+        include_str!("../fixtures/declaration_files.yaml"),
+        0x2100,
+        options,
+    );
     let valid = find_function(&report, b"valid_decl").unwrap();
     assert_eq!(valid.lines.len(), 1);
     assert_eq!(valid.lines[0].line, 20);

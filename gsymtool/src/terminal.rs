@@ -49,6 +49,14 @@ impl Terminal {
         &mut self.stdout
     }
 
+    pub(crate) const fn is_verbose(&self) -> bool {
+        matches!(self.mode, OutputMode::Verbose)
+    }
+
+    pub(crate) const fn is_quiet(&self) -> bool {
+        matches!(self.mode, OutputMode::Quiet)
+    }
+
     pub(crate) fn summary(&mut self) -> Option<&mut AutoStream<io::StderrLock<'static>>> {
         self.clear_progress();
         (self.mode != OutputMode::Quiet).then_some(&mut self.stderr)

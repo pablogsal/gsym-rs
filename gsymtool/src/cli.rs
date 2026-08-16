@@ -42,7 +42,7 @@ pub(crate) struct Cli {
     )]
     pub(crate) color: ColorMode,
 
-    /// Suppress successful write summaries.
+    /// Suppress successful output and nonfatal conversion warnings.
     #[arg(
         short,
         long,
@@ -52,7 +52,7 @@ pub(crate) struct Cli {
     )]
     pub(crate) quiet: bool,
 
-    /// Print each debuginfod request instead of replacing the live progress line.
+    /// Print detailed activity and every individual conversion diagnostic.
     #[arg(
         short,
         long,

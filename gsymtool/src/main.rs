@@ -20,9 +20,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use clap::CommandFactory;
 use gsym::convert::{
-    ConversionOptions, DiscoveryPolicy, DwarfImportOptions, ElfConverter, ElfInputs,
+    ConversionOptions, ConversionWarning, DiscoveryPolicy, DwarfImportOptions, ElfConverter,
+    ElfInputs,
 };
-use gsym::{Gsym, GsymBuilder, LookupOptions, LookupScratch, TranscodeOptions};
+use gsym::{AddressRange, Gsym, GsymBuilder, LookupOptions, LookupScratch, TranscodeOptions};
 
 use crate::cli::{
     Cli, CliEndian, CliVersion, Command, ConvertArgs, DumpArgs, DwarfToggles, HumanBytes,
@@ -149,9 +150,7 @@ fn convert_single(
     let candidate_functions = report.builder.functions().len();
     let source_files = report.builder.files().len().saturating_sub(1);
     let warning_count = report.warnings.len();
-    for warning in &report.warnings {
-        terminal.warning(format_args!("{warning}"))?;
-    }
+    print_conversion_warnings(&report.warnings, terminal)?;
 
     let output_size = persist_builder(report.builder, output)?;
     terminal.success(format_args!("wrote {}", output.display()))?;
@@ -214,6 +213,78 @@ fn convert_single(
             writeln!(stderr, "  DWP package  {}", path.display())?;
         }
         writeln!(stderr, "  elapsed      {}", Elapsed(started.elapsed()))?;
+    }
+    Ok(())
+}
+
+const REJECTED_RANGE_EXAMPLES: usize = 3;
+
+#[derive(Default)]
+struct RejectedRangeSummary {
+    count: usize,
+    examples: Vec<AddressRange>,
+}
+
+impl RejectedRangeSummary {
+    fn collect(warnings: &[ConversionWarning]) -> Self {
+        let mut summary = Self::default();
+        for warning in warnings {
+            let ConversionWarning::RejectedRange { range } = warning else {
+                continue;
+            };
+            summary.count = summary.count.saturating_add(1);
+            if summary.examples.len() < REJECTED_RANGE_EXAMPLES && !summary.examples.contains(range)
+            {
+                summary.examples.push(*range);
+            }
+        }
+        summary
+    }
+}
+
+impl fmt::Display for RejectedRangeSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "skipping {} non-live or invalid DWARF range{}",
+            Count(self.count),
+            if self.count == 1 { "" } else { "s" }
+        )?;
+        if !self.examples.is_empty() {
+            formatter.write_str("; examples: ")?;
+            for (index, range) in self.examples.iter().enumerate() {
+                if index != 0 {
+                    formatter.write_str(", ")?;
+                }
+                write!(formatter, "{:#x}..{:#x}", range.start, range.end)?;
+            }
+        }
+        formatter.write_str("; pass --verbose to show each unexpected rejected range")
+    }
+}
+
+fn print_conversion_warnings(
+    warnings: &[ConversionWarning],
+    terminal: &mut Terminal,
+) -> std::io::Result<()> {
+    if terminal.is_quiet() {
+        return Ok(());
+    }
+    if terminal.is_verbose() {
+        for warning in warnings {
+            terminal.warning(format_args!("{warning}"))?;
+        }
+        return Ok(());
+    }
+
+    for warning in warnings {
+        if !matches!(warning, ConversionWarning::RejectedRange { .. }) {
+            terminal.warning(format_args!("{warning}"))?;
+        }
+    }
+    let rejected = RejectedRangeSummary::collect(warnings);
+    if rejected.count != 0 {
+        terminal.warning(format_args!("{rejected}"))?;
     }
     Ok(())
 }
@@ -567,6 +638,31 @@ mod tests {
         assert_eq!(bytes(b"hello"), "hello");
         assert_eq!(bytes(&[0xff]), "\u{fffd}");
         assert_eq!(hex::encode([0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn rejected_range_summary_counts_all_ranges_and_keeps_distinct_examples() {
+        let rejected = |start, end| ConversionWarning::RejectedRange {
+            range: AddressRange::new(start, end),
+        };
+        let warnings = [
+            rejected(0, 0x1f),
+            rejected(0, 0x1f),
+            rejected(0, 2),
+            ConversionWarning::MalformedRanges {
+                stopped: false,
+                reason: "bad range list".into(),
+            },
+            rejected(0, 0x32),
+            rejected(0, 0x40),
+        ];
+
+        let summary = RejectedRangeSummary::collect(&warnings);
+
+        assert_eq!(
+            summary.to_string(),
+            "skipping 5 non-live or invalid DWARF ranges; examples: 0x0..0x1f, 0x0..0x2, 0x0..0x32; pass --verbose to show each unexpected rejected range"
+        );
     }
 
     #[test]

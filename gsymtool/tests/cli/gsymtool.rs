@@ -16,6 +16,14 @@ fn run_ok(arguments: &[&str]) -> Output {
     crate::tools::run(Command::new(env!("CARGO_BIN_EXE_gsymtool")).args(arguments))
 }
 
+fn warning_lines(output: &Output) -> Vec<&str> {
+    std::str::from_utf8(&output.stderr)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("warning:"))
+        .collect()
+}
+
 /// Compile a tiny relocatable ELF with DWARF, named so the batch can find it.
 fn compile_object(sources: &Path, name: &str, output: &Path) {
     let source = sources.join(format!("{name}.c"));
@@ -32,6 +40,37 @@ fn compile_object(sources: &Path, name: &str, output: &Path) {
         output.to_str().unwrap(),
         source.to_str().unwrap(),
     ]));
+}
+
+fn build_warning_fixture(root: &Path) -> PathBuf {
+    let yaml = root.join("warning-fixture.yaml");
+    let object = root.join("warning-fixture");
+    let text = root.join("text.bin");
+    let image = root.join("warning-fixture-with-text");
+    std::fs::write(
+        &yaml,
+        include_str!("../../../tests/fixtures/linker_tombstones.yaml"),
+    )
+    .unwrap();
+    std::fs::write(&text, vec![0_u8; 0x100]).unwrap();
+    crate::tools::run(Command::new(crate::tools::required_tool("yaml2obj")).args([
+        yaml.to_str().unwrap(),
+        "-o",
+        object.to_str().unwrap(),
+    ]));
+    crate::tools::run(
+        Command::new(crate::tools::required_tool("x86_64-linux-gnu-objcopy")).args([
+            "--add-section",
+            &format!(".text={}", text.display()),
+            "--set-section-flags",
+            ".text=alloc,code,readonly",
+            "--change-section-address",
+            ".text=0x1000",
+            object.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ]),
+    );
+    image
 }
 
 /// Build `tree/alpha.bin`, `tree/sub/beta.bin` and one file that is not an ELF.
@@ -209,6 +248,46 @@ fn terminal_color_overrides_and_completion_generation_work_when_piped() {
 
     let completions = run_ok(&["completions", "bash"]);
     assert!(String::from_utf8_lossy(&completions.stdout).contains("_gsymtool"));
+}
+
+#[test]
+fn conversion_warning_detail_obeys_output_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = build_warning_fixture(directory.path());
+    let image = image.to_str().unwrap();
+    let convert = |mode: &[&str], name| {
+        let output = directory.path().join(name);
+        let mut arguments = mode.to_vec();
+        arguments.extend_from_slice(&[
+            "convert",
+            image,
+            "-o",
+            output.to_str().unwrap(),
+            "--no-debuginfod",
+        ]);
+        run_ok(&arguments)
+    };
+
+    let normal = convert(&[], "normal.gsym");
+    assert_eq!(
+        warning_lines(&normal),
+        [
+            "warning: no valid DWARF inline records were found",
+            "warning: skipping 1 non-live or invalid DWARF range; examples: 0x3000..0x3020; pass --verbose to show each unexpected rejected range",
+        ]
+    );
+
+    let quiet = convert(&["--quiet"], "quiet.gsym");
+    assert_eq!(warning_lines(&quiet), Vec::<&str>::new());
+
+    let verbose = convert(&["--verbose"], "verbose.gsym");
+    assert_eq!(
+        warning_lines(&verbose),
+        [
+            "warning: skipping non-live or invalid DWARF range 0x3000..0x3020",
+            "warning: no valid DWARF inline records were found",
+        ]
+    );
 }
 
 #[test]
