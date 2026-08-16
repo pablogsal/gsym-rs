@@ -1,0 +1,75 @@
+--- !ELF
+FileHeader:
+  Class: ELFCLASS64
+  Data: ELFDATA2LSB
+  Type: ET_EXEC
+  Machine: EM_X86_64
+DWARF:
+  debug_str:
+    - ''
+    - tombstoned
+    - live
+    - outside_text
+    - minus_one
+    - minus_two
+  debug_abbrev:
+    - ID: 0
+      Table:
+        - Code: 0x1
+          Tag: DW_TAG_compile_unit
+          Children: DW_CHILDREN_yes
+        - Code: 0x2
+          Tag: DW_TAG_subprogram
+          Children: DW_CHILDREN_no
+          Attributes:
+            - Attribute: DW_AT_name
+              Form: DW_FORM_strp
+            - Attribute: DW_AT_low_pc
+              Form: DW_FORM_addr
+            - Attribute: DW_AT_high_pc
+              Form: DW_FORM_data4
+        - Code: 0x3
+          Tag: DW_TAG_subprogram
+          Children: DW_CHILDREN_no
+          Attributes:
+            - Attribute: DW_AT_name
+              Form: DW_FORM_strp
+            - Attribute: DW_AT_low_pc
+              Form: DW_FORM_addr
+            - Attribute: DW_AT_high_pc
+              Form: DW_FORM_addr
+  debug_info:
+    - Length: 0x66
+      Version: 4
+      AbbrevTableID: 0
+      AbbrOffset: 0x0
+      AddrSize: 8
+      Entries:
+        - AbbrCode: 0x1
+        - AbbrCode: 0x2
+          Values:
+            - Value: 0x1
+            - Value: 0x0
+            - Value: 0x20
+        - AbbrCode: 0x2
+          Values:
+            - Value: 0xC
+            - Value: 0x1000
+            - Value: 0x20
+        - AbbrCode: 0x2
+          Values:
+            - Value: 0x11
+            - Value: 0x3000
+            - Value: 0x20
+        - AbbrCode: 0x3
+          Values:
+            - Value: 0x1E
+            - Value: 0xFFFFFFFFFFFFFFFF
+            - Value: 0xFFFFFFFFFFFFFFFF
+        - AbbrCode: 0x3
+          Values:
+            - Value: 0x28
+            - Value: 0xFFFFFFFFFFFFFFFE
+            - Value: 0xFFFFFFFFFFFFFFFE
+        - AbbrCode: 0x0
+...

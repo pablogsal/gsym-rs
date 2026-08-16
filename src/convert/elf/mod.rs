@@ -234,8 +234,8 @@ impl Default for ConversionOptions {
 ///
 /// `symbol_functions` and `dwarf_functions` overlap: a function present in both
 /// the symbol table and the DWARF is counted once in each, and the builder keeps
-/// the richer record. `rejected_ranges` is the number to watch, since a large
-/// fraction usually means the DWARF does not match the image.
+/// the richer record. `rejected_ranges` includes expected linker tombstones as
+/// well as invalid or unrepresentable input ranges.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct ConversionStats {
@@ -247,7 +247,10 @@ pub struct ConversionStats {
     pub line_rows: usize,
     /// Inline nodes attached to imported functions.
     pub inline_nodes: usize,
-    /// Invalid, dead, or unrepresentable address ranges rejected.
+    /// Dead, invalid, or unrepresentable address ranges rejected.
+    ///
+    /// Expected zero, `-1`, or `-2` linker tombstones are counted here but do not
+    /// produce individual conversion warnings.
     pub rejected_ranges: usize,
 }
 

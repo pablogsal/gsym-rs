@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2 - 2026-08-16
+
+### Fixed
+
+- Treat zero, `-1`, and `-2` DWARF addresses outside executable sections as linker tombstones while retaining diagnostics for unexpected ranges.
+- Aggregate repeated range diagnostics, suppress nonfatal warnings in quiet mode, and retain individual diagnostics in verbose mode.
+
+### Documentation
+
+- Add LLVM benchmark results and expand the format, conversion, and symbolication guides.
+
 ## 0.1.1 - 2026-08-15
 
 ### Added

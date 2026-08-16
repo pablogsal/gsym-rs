@@ -238,6 +238,17 @@ fn import_unit<R: Reader<Offset = usize>>(
                 }
             };
             let candidate = AddressRange::new(range.begin, range.end);
+            let possible_tombstone =
+                candidate.start == 0 || unit.is_tombstone_address(candidate.start);
+            if possible_tombstone
+                && !context
+                    .executable_ranges
+                    .iter()
+                    .any(|text| text.contains(candidate.start))
+            {
+                context.stats.rejected_ranges = context.stats.rejected_ranges.saturating_add(1);
+                continue;
+            }
             if !is_live_range(candidate, context.executable_ranges) {
                 context.stats.rejected_ranges = context.stats.rejected_ranges.saturating_add(1);
                 context
