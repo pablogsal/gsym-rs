@@ -35,12 +35,12 @@ jobs:
 
       - uses: moonrepo/setup-rust@abb2d32350334249b178c401e5ec5836e0cd88d3 # v1.3.0
         with:
-          channel: stable
+          channel: 1.97.1
           cache-target: release
           bins: cargo-codspeed@5.0.1
 
       - name: Build benchmark targets
-        run: cargo codspeed build --bench gsym --all-features
+        run: cargo codspeed build --all-features
 
       - name: Measure and report benchmarks
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3

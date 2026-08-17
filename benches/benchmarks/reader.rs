@@ -11,6 +11,7 @@ use super::fixture::{
 const INDEXED_FUNCTIONS: usize = 100_000;
 const RICH_FUNCTIONS: usize = 10_000;
 const BATCH_QUERIES: usize = 4_096;
+const MISS_QUERIES: usize = 256;
 
 pub(crate) fn benchmarks(criterion: &mut Criterion) {
     parse(criterion);
@@ -73,60 +74,65 @@ fn lookup_records(criterion: &mut Criterion) {
     let lean = Gsym::parse(lean_bytes.as_slice()).expect("lean fixture must parse");
     let rich = Gsym::parse(rich_bytes.as_slice()).expect("rich fixture must parse");
     let address = hit(RICH_FUNCTIONS / 2);
-    let mut group = criterion.benchmark_group("reader/lookup_records");
-    group.throughput(Throughput::Elements(1));
+    {
+        let mut records = criterion.benchmark_group("reader/lookup_records");
+        records.throughput(Throughput::Elements(1));
 
-    group.bench_function("lean_allocating", |bencher| {
-        bencher.iter(|| {
-            black_box(
-                lean.lookup(black_box(address))
-                    .expect("lean lookup must not fail"),
-            )
-        });
-    });
-    group.bench_function("rich_allocating", |bencher| {
-        bencher.iter(|| {
-            black_box(
-                rich.lookup(black_box(address))
-                    .expect("rich lookup must not fail"),
-            )
-        });
-    });
-
-    let mut scratch = LookupScratch::with_capacity(4);
-    group.bench_function("rich_without_optional_records", |bencher| {
-        let options = LookupOptions {
-            line_information: false,
-            inline_frames: false,
-            call_sites: false,
-        };
-        bencher.iter(|| {
-            black_box(
-                rich.lookup_with_options(black_box(address), options, &mut scratch)
-                    .expect("option-filtered lookup must not fail"),
-            )
-        });
-    });
-
-    let mut scratch = LookupScratch::with_capacity(4);
-    group.bench_function("rich_frame_visitor", |bencher| {
-        bencher.iter(|| {
-            let mut frames = 0_usize;
-            let found = rich
-                .for_each_frame(
-                    black_box(address),
-                    FrameLookupOptions::default(),
-                    &mut scratch,
-                    |frame| {
-                        frames += 1;
-                        black_box(frame);
-                    },
+        records.bench_function("lean_allocating", |bencher| {
+            bencher.iter(|| {
+                black_box(
+                    lean.lookup(black_box(address))
+                        .expect("lean lookup must not fail"),
                 )
-                .expect("frame visitation must not fail");
-            black_box((found, frames));
+            });
         });
-    });
+        records.bench_function("rich_allocating", |bencher| {
+            bencher.iter(|| {
+                black_box(
+                    rich.lookup(black_box(address))
+                        .expect("rich lookup must not fail"),
+                )
+            });
+        });
 
+        let mut scratch = LookupScratch::with_capacity(4);
+        records.bench_function("rich_without_optional_records", |bencher| {
+            let options = LookupOptions {
+                line_information: false,
+                inline_frames: false,
+                call_sites: false,
+            };
+            bencher.iter(|| {
+                black_box(
+                    rich.lookup_with_options(black_box(address), options, &mut scratch)
+                        .expect("option-filtered lookup must not fail"),
+                )
+            });
+        });
+
+        let mut scratch = LookupScratch::with_capacity(4);
+        records.bench_function("rich_frame_visitor", |bencher| {
+            bencher.iter(|| {
+                let mut frames = 0_usize;
+                let found = rich
+                    .for_each_frame(
+                        black_box(address),
+                        FrameLookupOptions::default(),
+                        &mut scratch,
+                        |frame| {
+                            frames += 1;
+                            black_box(frame);
+                        },
+                    )
+                    .expect("frame visitation must not fail");
+                black_box((found, frames));
+            });
+        });
+        records.finish();
+    }
+
+    let mut misses = criterion.benchmark_group("reader/lookup_misses");
+    misses.throughput(Throughput::Elements(MISS_QUERIES as u64));
     for (name, address) in [
         ("miss_before", BASE_ADDRESS - 1),
         ("miss_gap", gap(RICH_FUNCTIONS / 2)),
@@ -135,16 +141,18 @@ fn lookup_records(criterion: &mut Criterion) {
             BASE_ADDRESS + RICH_FUNCTIONS as u64 * FUNCTION_STRIDE,
         ),
     ] {
-        group.bench_function(name, |bencher| {
+        misses.bench_function(name, |bencher| {
             bencher.iter(|| {
-                black_box(
-                    rich.lookup(black_box(address))
-                        .expect("miss lookup must not fail"),
-                )
+                for _ in 0..MISS_QUERIES {
+                    black_box(
+                        rich.lookup(black_box(address))
+                            .expect("miss lookup must not fail"),
+                    );
+                }
             });
         });
     }
-    group.finish();
+    misses.finish();
 }
 
 fn batches(criterion: &mut Criterion) {
