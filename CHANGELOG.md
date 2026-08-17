@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.3 - 2026-08-17
+
+### Fixed
+
+- Resolve relative split-DWARF files from both linked-image and recorded working-directory locations, validating DWO identifiers before import.
+- Preserve executable line rows and declaration and inline file indexes across GCC DWARF 4 and 5 DWO and DWP data.
+- Normalize duplicate and overlapping inline ranges without changing address coverage, and apply the GSYM depth limit only to the resulting inline tree.
+
+### Performance
+
+- Reduce conversion time and peak memory by compacting retained inline trees and replacing hash-based relocation maps with sorted tables.
+
 ## 0.1.2 - 2026-08-16
 
 ### Fixed
