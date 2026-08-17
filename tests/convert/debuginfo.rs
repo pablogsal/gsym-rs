@@ -367,6 +367,35 @@ fn discovers_build_id_debug_files_under_configured_roots() {
     assert!(report.stats.dwarf_functions > 0);
 }
 
+#[test]
+fn disabled_discovery_ignores_build_id_debug_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let (image, debug) = compile_debug_pair(directory.path());
+    let stripped = strip_debug(directory.path(), &image);
+    let image_bytes = std::fs::read(&stripped).unwrap();
+    let parsed = object::File::parse(image_bytes.as_slice()).unwrap();
+    let build_id = hex::encode(parsed.build_id().unwrap().unwrap());
+    let destination = directory
+        .path()
+        .join("debug-root/.build-id")
+        .join(build_id.get(..2).unwrap())
+        .join(format!("{}.debug", build_id.get(2..).unwrap()));
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::copy(debug, &destination).unwrap();
+    let options = ConversionOptions {
+        include_symbols: false,
+        discovery: DiscoveryPolicy::Disabled,
+        debug_directories: vec![directory.path().join("debug-root")],
+        ..ConversionOptions::default()
+    };
+
+    let report = ElfConverter::new(options).convert_path(&stripped).unwrap();
+
+    assert!(report.discovered_debug.is_none());
+    assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
+    assert!(report.builder.functions().is_empty());
+}
+
 #[cfg(feature = "debuginfod")]
 #[test]
 fn downloads_validated_debuginfo_and_reuses_the_cache_offline() {
@@ -422,6 +451,38 @@ fn downloads_validated_debuginfo_and_reuses_the_cache_offline() {
     let cached = converter.convert_path(&stripped).unwrap();
     assert_eq!(cached.discovered_debug.as_deref(), Some(cache_path));
     assert!(cached.stats.dwarf_functions > 0);
+}
+
+#[test]
+fn disabled_discovery_ignores_debuginfod_cache_and_servers() {
+    let directory = tempfile::tempdir().unwrap();
+    let (image, debug) = compile_debug_pair(directory.path());
+    let stripped = strip_debug(directory.path(), &image);
+    let image_bytes = std::fs::read(&stripped).unwrap();
+    let parsed = object::File::parse(image_bytes.as_slice()).unwrap();
+    let build_id = hex::encode(parsed.build_id().unwrap().unwrap());
+    let cache_root = directory.path().join("cache");
+    let cache_path = cache_root.join(build_id).join("debuginfo");
+    std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+    std::fs::copy(debug, &cache_path).unwrap();
+    let options = ConversionOptions {
+        include_symbols: false,
+        discovery: DiscoveryPolicy::Disabled,
+        debug_directories: Vec::new(),
+        debuginfod_urls: vec!["http://127.0.0.1:1".to_owned()],
+        debuginfod_cache: cache_root,
+        ..ConversionOptions::default()
+    };
+    let mut requests = 0_usize;
+
+    let report = ElfConverter::new(options)
+        .convert_path_with_observer(&stripped, |_| requests = requests.saturating_add(1))
+        .unwrap();
+
+    assert_eq!(requests, 0);
+    assert!(report.discovered_debug.is_none());
+    assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
+    assert!(report.builder.functions().is_empty());
 }
 
 #[cfg(feature = "debuginfod")]
