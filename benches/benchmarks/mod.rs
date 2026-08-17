@@ -1,5 +1,6 @@
-pub(crate) mod convert;
+#[expect(
+    dead_code,
+    reason = "the shared fixture also supports the separate writer benchmark target"
+)]
 pub(crate) mod fixture;
 pub(crate) mod reader;
-pub(crate) mod transform;
-pub(crate) mod writer;

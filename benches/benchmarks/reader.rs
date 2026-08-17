@@ -11,6 +11,7 @@ use super::fixture::{
 const INDEXED_FUNCTIONS: usize = 100_000;
 const RICH_FUNCTIONS: usize = 10_000;
 const BATCH_QUERIES: usize = 4_096;
+const MISS_QUERIES: usize = 256;
 
 pub(crate) fn benchmarks(criterion: &mut Criterion) {
     parse(criterion);
@@ -135,12 +136,15 @@ fn lookup_records(criterion: &mut Criterion) {
             BASE_ADDRESS + RICH_FUNCTIONS as u64 * FUNCTION_STRIDE,
         ),
     ] {
+        group.throughput(Throughput::Elements(MISS_QUERIES as u64));
         group.bench_function(name, |bencher| {
             bencher.iter(|| {
-                black_box(
-                    rich.lookup(black_box(address))
-                        .expect("miss lookup must not fail"),
-                )
+                for _ in 0..MISS_QUERIES {
+                    black_box(
+                        rich.lookup(black_box(address))
+                            .expect("miss lookup must not fail"),
+                    );
+                }
             });
         });
     }
