@@ -452,14 +452,37 @@ mod tests {
             0x3c
         );
 
-        let relocations = DwarfRelocations(HashMap::from([(
-            4,
+        let relocations = DwarfRelocations::new(vec![
             RelocationEntry {
+                offset: 12,
+                implicit_addend: false,
+                value: 0x2000,
+            },
+            RelocationEntry {
+                offset: 4,
                 implicit_addend: true,
                 value: 0x1000,
             },
-        )]));
+        ])
+        .unwrap();
         assert_eq!(relocations.apply(4, 0x24), 0x1024);
+        assert_eq!(relocations.apply(12, 0x24), 0x2000);
+        assert_eq!(relocations.apply(8, 0x24), 0x24);
+        assert!(
+            DwarfRelocations::new(vec![
+                RelocationEntry {
+                    offset: 4,
+                    implicit_addend: false,
+                    value: 1,
+                },
+                RelocationEntry {
+                    offset: 4,
+                    implicit_addend: false,
+                    value: 2,
+                },
+            ])
+            .is_err()
+        );
     }
 
     #[test]
