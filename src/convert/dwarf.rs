@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use gimli::{
@@ -13,8 +14,8 @@ mod sections;
 
 use dies::{DetailOptions, extract_subprogram_details};
 #[cfg(test)]
-use lines::{LineSequenceRange, SequencedLine, UnitLines, scan_line_sequence_offsets};
-use lines::{collect_lines, statement_sequence_offset};
+use lines::{LineSequenceRange, SequencedLine, scan_line_sequence_offsets};
+use lines::{UnitLines, collect_lines, statement_sequence_offset};
 #[cfg(test)]
 use object::{RelocationEncoding, RelocationKind};
 use references::{absolute_entry_offset, attribute_bytes, resolve_declaration_line, resolve_name};
@@ -28,7 +29,7 @@ use super::ConversionWarning;
 use super::elf::{AddressLayout, ConversionStats};
 #[cfg(test)]
 use crate::model::LineEntry;
-use crate::model::{AddressRange, Function};
+use crate::model::{AddressRange, FileIndex, Function};
 use crate::{ElfInputKind, Error, GsymBuilder, Result};
 
 const DW_AT_LLVM_STMT_SEQUENCE: gimli::DwAt = gimli::DwAt(0x3e0c);
@@ -143,6 +144,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
     while let Some(header) = headers.next().map_err(gimli_error)? {
         let unit = dwarf.unit(header).map_err(gimli_error)?;
         if let Some(dwo_id) = unit.dwo_id {
+            let skeleton_lines = collect_lines(&dwarf, &unit, context.builder, context.warnings)?;
             let mut failures = Vec::new();
             if let Some(base) = dwo_base {
                 match load_dwo(&dwarf, &unit, dwo_id, base, layout) {
@@ -154,7 +156,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
                             )
                         });
                         dwo.make_dwo(&dwarf);
-                        import_units(&dwo, &mut context)?;
+                        import_split_units(&dwo, &skeleton_lines, &mut context)?;
                         continue;
                     }
                     Ok(None) => {}
@@ -164,7 +166,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
             if let Some(package) = &dwp_package {
                 match package.find_cu(dwo_id, &dwarf).map_err(gimli_error) {
                     Ok(Some(dwo)) => {
-                        import_units(&dwo, &mut context)?;
+                        import_split_units(&dwo, &skeleton_lines, &mut context)?;
                         continue;
                     }
                     Ok(None) => failures.push("unit is absent from the DWP index".into()),
@@ -177,6 +179,14 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
                     dwo_id: dwo_id.0,
                     reasons: failures.into_boxed_slice(),
                 });
+            import_unit_details(
+                &dwarf,
+                &unit,
+                &skeleton_lines,
+                &skeleton_lines.files,
+                &mut context,
+            )?;
+            continue;
         }
         import_unit(&dwarf, &unit, &mut context)?;
     }
@@ -187,14 +197,15 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
     Ok(())
 }
 
-fn import_units<R: Reader<Offset = usize>>(
+fn import_split_units<R: Reader<Offset = usize>>(
     dwarf: &Dwarf<R>,
+    skeleton_lines: &UnitLines,
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
     let mut headers = dwarf.units();
     while let Some(header) = headers.next().map_err(gimli_error)? {
         let unit = dwarf.unit(header).map_err(gimli_error)?;
-        import_unit(dwarf, &unit, context)?;
+        import_split_unit(dwarf, &unit, skeleton_lines, context)?;
     }
     Ok(())
 }
@@ -205,6 +216,37 @@ fn import_unit<R: Reader<Offset = usize>>(
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
     let unit_lines = collect_lines(dwarf, unit, context.builder, context.warnings)?;
+    import_unit_details(dwarf, unit, &unit_lines, &unit_lines.files, context)
+}
+
+fn import_split_unit<R: Reader<Offset = usize>>(
+    dwarf: &Dwarf<R>,
+    unit: &Unit<R>,
+    skeleton_lines: &UnitLines,
+    context: &mut ImportContext<'_>,
+) -> Result<()> {
+    let unit_lines = collect_lines(dwarf, unit, context.builder, context.warnings)?;
+    let executable_lines =
+        if skeleton_lines.entries.is_empty() && skeleton_lines.sequences.is_empty() {
+            &unit_lines
+        } else {
+            skeleton_lines
+        };
+    let file_indices = if unit_lines.files.is_empty() {
+        &executable_lines.files
+    } else {
+        &unit_lines.files
+    };
+    import_unit_details(dwarf, unit, executable_lines, file_indices, context)
+}
+
+fn import_unit_details<R: Reader<Offset = usize>>(
+    dwarf: &Dwarf<R>,
+    unit: &Unit<R>,
+    executable_lines: &UnitLines,
+    file_indices: &HashMap<u64, FileIndex>,
+    context: &mut ImportContext<'_>,
+) -> Result<()> {
     let mut entries = unit.entries();
     while let Some(entry) = entries.next_dfs().map_err(gimli_error)? {
         if entry.tag() != gimli::constants::DW_TAG_subprogram {
@@ -258,7 +300,7 @@ fn import_unit<R: Reader<Offset = usize>>(
             }
             let statement_sequence = statement_sequence_offset(unit, entry);
             let (mut function_lines, invalid_statement_sequence) =
-                unit_lines.for_range(candidate, statement_sequence);
+                executable_lines.for_range(candidate, statement_sequence);
             if invalid_statement_sequence {
                 let Some(sequence_offset) = statement_sequence else {
                     return Err(Error::InvalidModel(
@@ -277,7 +319,7 @@ fn import_unit<R: Reader<Offset = usize>>(
                     dwarf,
                     unit,
                     entry,
-                    &unit_lines.files,
+                    file_indices,
                     context.builder,
                     context.warnings,
                 )?
@@ -292,7 +334,7 @@ fn import_unit<R: Reader<Offset = usize>>(
                 entry.offset(),
                 AddressRange::new(range.begin, range.end),
                 &name,
-                &unit_lines.files,
+                file_indices,
                 &mut DetailOptions {
                     include_inlines: context.include_inlines,
                     include_call_sites: context.include_call_sites,
@@ -328,27 +370,48 @@ fn load_dwo<R: Reader<Offset = usize>>(
     if name.is_empty() {
         return Ok(None);
     }
-    let mut path = if let Some(comp_dir) = &unit.comp_dir {
-        bytes_path(&comp_dir.to_slice().map_err(gimli_error)?)
-    } else {
-        base.to_path_buf()
-    };
-    if path.is_relative() {
-        path = base.join(path);
-    }
-    path.push(bytes_path(&name));
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(Error::IoAtPath {
-                operation: "read DWO file",
-                path,
-                source,
-            });
+    let name = bytes_path(&name);
+    let mut paths = if let Some(comp_dir) = &unit.comp_dir {
+        let comp_dir = bytes_path(&comp_dir.to_slice().map_err(gimli_error)?);
+        let relative = comp_dir.join(&name);
+        if comp_dir.is_relative() {
+            vec![base.join(&relative), relative]
+        } else {
+            vec![relative]
         }
+    } else {
+        vec![base.join(&name)]
     };
-    let file = object::File::parse(bytes.as_slice()).map_err(|source| Error::ElfParse {
+    paths.dedup();
+    let mut failure = None;
+    for path in paths {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                failure = Some(Error::IoAtPath {
+                    operation: "read DWO file",
+                    path,
+                    source,
+                });
+                continue;
+            }
+        };
+        match parse_dwo(&bytes, &path, expected_id, layout) {
+            Ok(dwo) => return Ok(Some(dwo)),
+            Err(error) => failure = Some(error),
+        }
+    }
+    failure.map_or(Ok(None), Err)
+}
+
+fn parse_dwo(
+    bytes: &[u8],
+    path: &Path,
+    expected_id: gimli::DwoId,
+    layout: &AddressLayout,
+) -> Result<(DwarfSections<SectionData<'static>>, RunTimeEndian)> {
+    let file = object::File::parse(bytes).map_err(|source| Error::ElfParse {
         input: ElfInputKind::Dwo,
         source: crate::ParserError::object(source),
     })?;
@@ -364,9 +427,16 @@ fn load_dwo<R: Reader<Offset = usize>>(
             &section.relocations,
         )
     });
-    let Some(header) = borrowed.units().next().map_err(gimli_error)? else {
-        return Ok(None);
-    };
+    let header = borrowed
+        .units()
+        .next()
+        .map_err(gimli_error)?
+        .ok_or_else(|| {
+            Error::malformed(
+                "DWO file",
+                format!("no compilation unit in {}", path.display()),
+            )
+        })?;
     let dwo_unit = borrowed.unit(header).map_err(gimli_error)?;
     if dwo_unit.dwo_id != Some(expected_id) {
         return Err(Error::malformed(
@@ -376,7 +446,7 @@ fn load_dwo<R: Reader<Offset = usize>>(
     }
     drop(dwo_unit);
     drop(borrowed);
-    Ok(Some((sections, endian)))
+    Ok((sections, endian))
 }
 
 #[cfg(unix)]
