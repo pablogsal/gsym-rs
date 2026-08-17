@@ -40,6 +40,7 @@ fn follows_split_dwarf_units_and_imports_dwo_functions() {
         .convert_path(&image)
         .unwrap();
     assert!(report.stats.dwarf_functions > 0, "{:?}", report.warnings);
+    assert_eq!(report.stats.split_dwarf_units, 1);
     assert!(find_function(&report, b"split_target").is_some());
 }
 
@@ -81,6 +82,7 @@ fn disabled_discovery_ignores_individual_dwo_files() {
             .any(|warning| matches!(warning, ConversionWarning::SplitDwarfUnavailable { .. }))
     );
     assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
+    assert_eq!(report.stats.split_dwarf_units, 0);
     assert!(report.builder.functions().is_empty());
 }
 
@@ -278,6 +280,7 @@ fn discovers_dwp_packages_after_individual_dwo_files_are_unavailable() {
         .unwrap();
     assert_eq!(report.discovered_dwp.as_deref(), Some(dwp.as_path()));
     assert!(report.stats.dwarf_functions > 0, "{:?}", report.warnings);
+    assert_eq!(report.stats.split_dwarf_units, 1);
     assert!(
         report
             .builder

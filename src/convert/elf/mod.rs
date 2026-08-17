@@ -241,6 +241,8 @@ pub struct ConversionStats {
     pub symbol_functions: usize,
     /// Functions imported from DWARF DIEs.
     pub dwarf_functions: usize,
+    /// Skeleton units whose matching DWO or DWP data was imported.
+    pub split_dwarf_units: usize,
     /// Source-line rows attached to imported functions.
     pub line_rows: usize,
     /// Inline nodes attached to imported functions.
