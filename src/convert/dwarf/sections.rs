@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use gimli::{ReaderOffset, Relocate, SectionId};
 use object::{
@@ -35,10 +34,11 @@ impl SectionData<'_> {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct DwarfRelocations(pub(super) HashMap<u64, RelocationEntry>);
+pub(super) struct DwarfRelocations(Vec<RelocationEntry>);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RelocationEntry {
+    pub(super) offset: u64,
     pub(super) implicit_addend: bool,
     pub(super) value: u64,
 }
@@ -55,13 +55,33 @@ impl Relocate for &DwarfRelocations {
 
 impl DwarfRelocations {
     pub(super) fn apply(&self, offset: usize, value: u64) -> u64 {
-        self.0.get(&(offset as u64)).map_or(value, |relocation| {
-            if relocation.implicit_addend {
-                value.wrapping_add(relocation.value)
-            } else {
-                relocation.value
+        self.0
+            .binary_search_by_key(&(offset as u64), |relocation| relocation.offset)
+            .ok()
+            .and_then(|index| self.0.get(index))
+            .map_or(value, |relocation| {
+                if relocation.implicit_addend {
+                    value.wrapping_add(relocation.value)
+                } else {
+                    relocation.value
+                }
+            })
+    }
+
+    pub(super) fn new(mut relocations: Vec<RelocationEntry>) -> Result<Self> {
+        relocations.sort_unstable_by_key(|relocation| relocation.offset);
+        let mut previous = None;
+        for relocation in &relocations {
+            if previous == Some(relocation.offset) {
+                return Err(Error::malformed(
+                    "DWARF relocation",
+                    format!("multiple entries at {:#x}", relocation.offset),
+                ));
             }
-        })
+            previous = Some(relocation.offset);
+        }
+        relocations.shrink_to_fit();
+        Ok(Self(relocations))
     }
 
     fn load(
@@ -69,7 +89,7 @@ impl DwarfRelocations {
         section: &object::Section<'_, '_>,
         layout: &AddressLayout,
     ) -> Result<Self> {
-        let mut output = HashMap::new();
+        let mut output = Vec::new();
         for (offset, relocation) in section.relocations() {
             if relocation.kind() == RelocationKind::None {
                 continue;
@@ -141,23 +161,13 @@ impl DwarfRelocations {
                 place,
                 relocation.addend(),
             )?;
-            if output
-                .insert(
-                    offset,
-                    RelocationEntry {
-                        implicit_addend: relocation.has_implicit_addend(),
-                        value,
-                    },
-                )
-                .is_some()
-            {
-                return Err(Error::malformed(
-                    "DWARF relocation",
-                    format!("multiple entries at {offset:#x}"),
-                ));
-            }
+            output.push(RelocationEntry {
+                offset,
+                implicit_addend: relocation.has_implicit_addend(),
+                value,
+            });
         }
-        Ok(Self(output))
+        Self::new(output)
     }
 }
 

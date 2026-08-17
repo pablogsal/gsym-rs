@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use gimli::{AttributeValue, Format, Reader};
+use gimli::{AttributeValue, DebugLineOffset, DwarfFileType, Format, Reader, Section};
 
 use super::references::attribute_bytes;
 use super::{DW_AT_LLVM_STMT_SEQUENCE, gimli_error};
@@ -95,7 +95,24 @@ pub(super) fn collect_lines<R: Reader<Offset = usize>>(
     builder: &mut GsymBuilder,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Result<UnitLines> {
-    let Some(line_program) = unit.line_program.clone() else {
+    let line_program = if let Some(line_program) = unit.line_program.clone() {
+        line_program
+    } else if dwarf.file_type == DwarfFileType::Dwo
+        && matches!(unit.header.version(), 4 | 5)
+        && !dwarf.debug_line.reader().is_empty()
+    {
+        // GCC keeps this file table at the start of the DWO contribution while
+        // DW_AT_stmt_list remains in the skeleton unit.
+        dwarf
+            .debug_line
+            .program(
+                DebugLineOffset(0),
+                unit.header.address_size(),
+                unit.comp_dir.clone(),
+                unit.name.clone(),
+            )
+            .map_err(gimli_error)?
+    } else {
         return Ok(UnitLines {
             entries: Vec::new(),
             files: HashMap::new(),
