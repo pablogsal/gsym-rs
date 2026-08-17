@@ -14,8 +14,8 @@ from GitHub Actions; do not create or push the tag manually.
 
 ## Prepare
 
-1. Update the versions in `Cargo.toml` and `gsymtool/Cargo.toml` to `X.Y.Z`,
-   then run `cargo update --workspace`.
+1. Update the version in `Cargo.toml` to `X.Y.Z`, then run
+   `cargo update --workspace`.
 2. Move the relevant entries from `## Unreleased` in `CHANGELOG.md` into
    `## X.Y.Z - YYYY-MM-DD`. That section becomes the GitHub release notes.
 3. Run:

@@ -30,8 +30,8 @@ class SerialNumberTests(unittest.TestCase):
     def test_prepare_injects_attestable_serial_number(self) -> None:
         version = "0.1.1"
         target = "x86_64-unknown-linux-gnu"
-        root = "pkg:cargo/gsymtool@0.1.1"
-        library = "pkg:cargo/gsym-rs@0.1.1"
+        root = "pkg:cargo/gsym-rs@0.1.1"
+        dependency = "pkg:cargo/object@0.40.0"
         document = {
             "bomFormat": "CycloneDX",
             "specVersion": "1.5",
@@ -43,6 +43,7 @@ class SerialNumberTests(unittest.TestCase):
                     "name": "gsymtool",
                     "type": "application",
                     "version": version,
+                    "purl": root,
                 },
                 "properties": [
                     {"name": "cdx:rustc:sbom:target:triple", "value": target}
@@ -50,15 +51,15 @@ class SerialNumberTests(unittest.TestCase):
             },
             "components": [
                 {
-                    "bom-ref": library,
-                    "name": "gsym-rs",
+                    "bom-ref": dependency,
+                    "name": "object",
                     "type": "library",
-                    "version": version,
+                    "version": "0.40.0",
                 }
             ],
             "dependencies": [
-                {"ref": root, "dependsOn": [library]},
-                {"ref": library, "dependsOn": []},
+                {"ref": root, "dependsOn": [dependency]},
+                {"ref": dependency, "dependsOn": []},
             ],
         }
 

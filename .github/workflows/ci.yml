@@ -283,7 +283,7 @@ jobs:
           underscored=${TARGET//-/_}
           export "CC_${underscored}=${LINKER}"
           export "CARGO_TARGET_${underscored^^}_LINKER=${LINKER}"
-          cargo build --package gsymtool --release --locked --target "$TARGET"
+          cargo build --package gsym-rs --bin gsymtool --release --locked --target "$TARGET"
           root=$(mktemp -d)
           python3 scripts/build_release_archive.py \
             --binary "target/${TARGET}/release/gsymtool" \

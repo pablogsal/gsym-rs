@@ -104,7 +104,7 @@
 //! | --- | --- | --- |
 //! | `mmap` | yes | `MappedGsym`, a reader backed by a read-only memory map |
 //! | `convert` | yes | the `convert` module: Linux ELF and DWARF import |
-//! | `debuginfod` | no | debuginfod network lookup during conversion |
+//! | `debuginfod` | yes | debuginfod network lookup during conversion |
 //!
 //! The codec needs neither default feature:
 //!

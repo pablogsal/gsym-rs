@@ -20,28 +20,46 @@ rustdoc-args = ["--cfg", "docsrs"]
 name = "gsym"
 path = "src/lib.rs"
 
+[[bin]]
+name = "gsymtool"
+path = "gsymtool/src/main.rs"
+required-features = ["convert"]
+
+[[test]]
+name = "cli"
+path = "gsymtool/tests/cli/main.rs"
+required-features = ["convert"]
+
 [workspace]
-members = ["gsymtool"]
 resolver = "3"
 
 [features]
-default = ["mmap", "convert"]
+default = ["mmap", "convert", "debuginfod"]
 mmap = ["dep:memmap2"]
-convert = ["dep:crc32fast", "dep:gimli", "dep:hex", "dep:lzma-rs", "dep:object"]
+convert = ["dep:crc32fast", "dep:gimli", "dep:lzma-rs", "dep:object"]
 debuginfod = ["convert", "dep:debuginfod-client"]
 
 [dependencies]
+anstream = "1.0"
+anstyle = "1.0"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 crc32fast = { version = "1.5", optional = true }
 gimli = { version = "0.34", optional = true, default-features = false, features = ["read", "std"] }
 hashbrown = { version = "0.17", default-features = false, features = ["inline-more"] }
-hex = { version = "0.4", optional = true, default-features = false, features = ["std"] }
+hex = { version = "0.4", default-features = false, features = ["std"] }
 memmap2 = { version = "0.9.8", optional = true }
 lzma-rs = { version = "0.3", optional = true }
 object = { version = "0.40", optional = true, default-features = false, features = ["read", "compression", "elf", "std"] }
 smallvec = "1.15"
+tempfile = "3.20"
 thiserror = "2.0"
 zerocopy = "0.8.56"
 debuginfod-client = { package = "debuginfod", version = "0.3", optional = true, default-features = false, features = ["reqwest"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = "0.1.52"
 
 [dev-dependencies]
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1", features = ["html_reports"] }

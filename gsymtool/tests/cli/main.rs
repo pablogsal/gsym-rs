@@ -1,8 +1,7 @@
 //! Command-line suite: the `gsymtool` binary and interoperability with LLVM.
 //!
-//! Both modules drive real processes on a Linux host. The `gsymtool` binary
-//! pins its own feature set, so these tests only need `convert` for the
-//! in-process conversion `interop` performs before handing bytes to LLVM.
+//! Both modules drive real processes on a Linux host. These tests use the same
+//! package features as the `gsymtool` binary they execute.
 
 #![cfg(target_os = "linux")]
 
