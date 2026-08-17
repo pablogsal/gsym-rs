@@ -10,9 +10,7 @@ use std::process::Command;
 #[cfg(all(feature = "convert", target_os = "linux"))]
 use criterion::Throughput;
 #[cfg(all(feature = "convert", target_os = "linux"))]
-use gsym::convert::{
-    ConversionOptions, DiscoveryPolicy, DwarfImportOptions, ElfConverter, ElfInputs,
-};
+use gsym::convert::{ConversionOptions, DwarfImportOptions, ElfConverter, ElfInputs};
 
 #[cfg(all(feature = "convert", target_os = "linux"))]
 pub(crate) fn benchmarks(criterion: &mut Criterion) {
@@ -22,7 +20,6 @@ pub(crate) fn benchmarks(criterion: &mut Criterion) {
             "symbols_only",
             ConversionOptions {
                 dwarf: None,
-                discovery: DiscoveryPolicy::Disabled,
                 ..ConversionOptions::default()
             },
         ),
@@ -34,7 +31,6 @@ pub(crate) fn benchmarks(criterion: &mut Criterion) {
                     inline_info: false,
                     call_sites: false,
                 }),
-                discovery: DiscoveryPolicy::Disabled,
                 ..ConversionOptions::default()
             },
         ),
@@ -46,17 +42,10 @@ pub(crate) fn benchmarks(criterion: &mut Criterion) {
                     inline_info: true,
                     call_sites: false,
                 }),
-                discovery: DiscoveryPolicy::Disabled,
                 ..ConversionOptions::default()
             },
         ),
-        (
-            "symbols_and_full_dwarf",
-            ConversionOptions {
-                discovery: DiscoveryPolicy::Disabled,
-                ..ConversionOptions::default()
-            },
-        ),
+        ("symbols_and_full_dwarf", ConversionOptions::default()),
     ];
 
     let mut group = criterion.benchmark_group("convert/elf_dwarf");

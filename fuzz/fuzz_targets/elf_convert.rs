@@ -1,9 +1,7 @@
 #![no_main]
 
 use gsym::Gsym;
-use gsym::convert::{
-    ConversionOptions, DiscoveryPolicy, DwarfImportOptions, ElfConverter, ElfInputs,
-};
+use gsym::convert::{ConversionOptions, DwarfImportOptions, ElfConverter, ElfInputs};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_EXPANDED_DEBUG_DATA: u64 = 4 * 1024 * 1024;
@@ -12,10 +10,6 @@ const ENVELOPE_MAGIC: &[u8; 8] = b"GSYMELF\0";
 fuzz_target!(|data: &[u8]| {
     let (inputs, control) = decode_inputs(data);
     let mut options = ConversionOptions {
-        discovery: DiscoveryPolicy::Disabled,
-        debug_directories: Vec::new(),
-        debuginfod_urls: Vec::new(),
-        debuginfod_max_download_size: MAX_EXPANDED_DEBUG_DATA,
         gnu_debugdata_max_decompressed_size: MAX_EXPANDED_DEBUG_DATA,
         ..ConversionOptions::default()
     };
