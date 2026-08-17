@@ -36,6 +36,8 @@ REQUIRED_PATHS = [
     "CHANGELOG.md",
     "Cargo.lock",
     "Cargo.toml",
+    "fuzz/Cargo.lock",
+    "fuzz/Cargo.toml",
     "LICENSE-APACHE",
     "LICENSE-MIT",
     "README.md",
@@ -48,6 +50,7 @@ REQUIRED_PATHS = [
     "scripts/verify_release_archive.py",
     "src/lib.rs",
 ]
+LOCKFILES = ["Cargo.lock", "fuzz/Cargo.lock"]
 USER_AGENT = f"{CRATE}-release-contract (https://github.com/pablogsal/gsym-rs)"
 
 fail = make_fail("release contract failure")
@@ -56,6 +59,14 @@ fail = make_fail("release contract failure")
 def load_toml(path: Path) -> dict:
     with path.open("rb") as stream:
         return tomllib.load(stream)
+
+
+def validate_lockfile(path: Path, version: str) -> None:
+    locked = [
+        entry for entry in load_toml(path)["package"] if entry["name"] == CRATE
+    ]
+    if len(locked) != 1 or locked[0]["version"] != version:
+        fail(f"{path.relative_to(ROOT)} is not in sync with version {version}")
 
 
 def git(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -157,18 +168,14 @@ def validate_structure() -> str:
     if slug and repository.rstrip("/") != f"https://github.com/{slug}":
         fail(f"Cargo repository metadata {repository} does not match {slug}")
 
-    locked = [
-        entry
-        for entry in load_toml(ROOT / "Cargo.lock")["package"]
-        if entry["name"] == CRATE
-    ]
-    if len(locked) != 1 or locked[0]["version"] != version:
-        fail(f"Cargo.lock is not in sync with version {version}")
+    for lockfile in LOCKFILES:
+        validate_lockfile(ROOT / lockfile, version)
 
     if in_git_worktree():
-        tracked = git("ls-files", "--error-unmatch", "Cargo.lock", check=False)
-        if tracked.returncode != 0:
-            fail("Cargo.lock must be committed")
+        for lockfile in LOCKFILES:
+            tracked = git("ls-files", "--error-unmatch", lockfile, check=False)
+            if tracked.returncode != 0:
+                fail(f"{lockfile} must be committed")
 
     changelog = (ROOT / "CHANGELOG.md").read_text()
     sections = CHANGELOG_SECTION.findall(changelog)
