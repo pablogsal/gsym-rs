@@ -12,16 +12,21 @@
 
 ## Install
 
+Use the library from Cargo:
+
 ```toml
 [dependencies]
 gsym-rs = "0.1"
 ```
 
-Build the CLI from a checkout:
+Install the command-line tool:
 
 ```console
-cargo install --path gsymtool
+cargo install gsym-rs --locked
 ```
+
+This installs `gsymtool` with ELF/DWARF conversion, memory mapping, and
+debuginfod discovery enabled.
 
 ## Read
 
@@ -118,7 +123,7 @@ the load bias from runtime addresses in PIE executables and shared libraries.
 | --- | --- | --- |
 | `mmap` | Yes | Memory-mapped GSYM files |
 | `convert` | Yes | Linux ELF and DWARF conversion |
-| `debuginfod` | No | Remote separate-debug discovery |
+| `debuginfod` | Yes | Remote separate-debug discovery |
 
 Reader and writer only:
 

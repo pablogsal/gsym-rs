@@ -56,7 +56,7 @@ jobs:
       - name: Build the instrumented CLI
         run: >-
           cargo llvm-cov run
-          --package gsymtool
+          --package gsym-rs
           --bin gsymtool
           --all-features
           --no-report

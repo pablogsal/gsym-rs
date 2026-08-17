@@ -113,6 +113,9 @@ def validate(document: dict, version: str, target: str) -> None:
         fail("metadata.component does not describe this gsymtool release")
     if root.get("type") != "application":
         fail("gsymtool must be identified as an application")
+    purl = root.get("purl")
+    if not isinstance(purl, str) or not purl.startswith(f"pkg:cargo/{CRATE}@{version}"):
+        fail(f"gsymtool must come from the {CRATE} {version} package")
     properties = metadata.get("properties", [])
     if not isinstance(properties, list) or not any(
         isinstance(prop, dict)
@@ -126,13 +129,8 @@ def validate(document: dict, version: str, target: str) -> None:
     dependencies = document.get("dependencies")
     if not isinstance(dependencies, list) or not dependencies:
         fail("the SBOM has no dependency graph")
-    if not any(
-        isinstance(component, dict)
-        and component.get("name") == CRATE
-        and component.get("version") == version
-        for component in dependency_components
-    ):
-        fail(f"the SBOM does not contain {CRATE} {version}")
+    if not isinstance(dependency_components, list):
+        fail("the SBOM components are not a list")
 
     all_refs = component_refs(document)
     refs = set(all_refs)

@@ -196,7 +196,7 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
           TARGET: ${{ matrix.target }}
-        run: cargo build --package gsymtool --release --locked --target "$TARGET"
+        run: cargo build --package gsym-rs --bin gsymtool --release --locked --target "$TARGET"
 
       - name: Assemble and verify the release archive
         env:
@@ -241,19 +241,18 @@ jobs:
           export SOURCE_DATE_EPOCH
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")
           while read -r target; do
-            name="gsymtool-${VERSION}-${target}.cdx"
             cargo cyclonedx \
-              --manifest-path gsymtool/Cargo.toml \
+              --manifest-path Cargo.toml \
+              --describe binaries \
               --format json \
               --spec-version 1.5 \
               --all-features \
               --target "$target" \
-              --license-strict \
-              --override-filename "$name"
+              --license-strict
             python3 scripts/prepare_release_sbom.py \
               --version "$VERSION" \
               --target "$target" \
-              --input "gsymtool/${name}.json" \
+              --input gsymtool_bin.cdx.json \
               --output release-sbom
           done < <(python3 scripts/release_common.py --plan "$VERSION" | jq -r '.targets[]')
 

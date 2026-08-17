@@ -40,7 +40,6 @@ REQUIRED_PATHS = [
     "LICENSE-MIT",
     "README.md",
     "RELEASE.md",
-    "gsymtool/Cargo.toml",
     "scripts/build_release_archive.py",
     "scripts/install_cargo_cyclonedx.sh",
     "scripts/prepare_release_assets.py",
@@ -143,16 +142,15 @@ def validate_structure() -> str:
         fail("crates.io requires both description and repository metadata")
     if not package.get("rust-version"):
         fail("the crate must declare its supported Rust version")
-    if cargo["workspace"]["members"] != ["gsymtool"]:
-        fail("the workspace must contain exactly the gsymtool member")
-
-    tool = load_toml(ROOT / "gsymtool/Cargo.toml")["package"]
-    if tool.get("publish") is not False:
-        fail("gsymtool must stay unpublished; only the library goes to crates.io")
-    if tool["version"] != version:
-        fail(f"gsymtool {tool['version']} does not match the library version {version}")
-    if tool.get("rust-version") != package["rust-version"]:
-        fail("the library and gsymtool must declare the same supported Rust version")
+    binaries = cargo.get("bin", [])
+    if binaries != [
+        {
+            "name": "gsymtool",
+            "path": "gsymtool/src/main.rs",
+            "required-features": ["convert"],
+        }
+    ]:
+        fail("the published package must contain the gsymtool binary")
 
     repository = package["repository"]
     slug = os.environ.get("GITHUB_REPOSITORY")
@@ -162,9 +160,9 @@ def validate_structure() -> str:
     locked = [
         entry
         for entry in load_toml(ROOT / "Cargo.lock")["package"]
-        if entry["name"] in {CRATE, "gsymtool"}
+        if entry["name"] == CRATE
     ]
-    if len(locked) != 2 or any(entry["version"] != version for entry in locked):
+    if len(locked) != 1 or locked[0]["version"] != version:
         fail(f"Cargo.lock is not in sync with version {version}")
 
     if in_git_worktree():

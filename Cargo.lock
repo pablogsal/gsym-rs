@@ -619,6 +619,11 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "gsym-rs"
 version = "0.1.3"
 dependencies = [
+ "anstream",
+ "anstyle",
+ "anyhow",
+ "clap",
+ "clap_complete",
  "codspeed-criterion-compat",
  "crc32fast",
  "debuginfod",
@@ -627,27 +632,13 @@ dependencies = [
  "hex",
  "lzma-rs",
  "memmap2",
+ "mimalloc",
  "object",
  "proptest",
  "smallvec",
  "tempfile",
  "thiserror",
  "zerocopy",
-]
-
-[[package]]
-name = "gsymtool"
-version = "0.1.3"
-dependencies = [
- "anstream",
- "anstyle",
- "anyhow",
- "clap",
- "clap_complete",
- "gsym-rs",
- "hex",
- "mimalloc",
- "tempfile",
 ]
 
 [[package]]
