@@ -609,7 +609,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn debuginfod_is_enabled_by_default_and_can_be_disabled() {
+    fn discovery_toggles_update_the_conversion_policy() {
         let mut options = ConversionOptions {
             debuginfod_urls: vec!["https://debuginfod.example".to_owned()],
             ..ConversionOptions::default()
@@ -630,6 +630,17 @@ mod tests {
                 no_debuginfod: true,
             },
         );
+        assert!(options.debuginfod_urls.is_empty());
+
+        options.debuginfod_urls = vec!["https://debuginfod.example".to_owned()];
+        apply_discovery_toggles(
+            &mut options,
+            &cli::DiscoveryToggles {
+                no_discovery: true,
+                no_debuginfod: false,
+            },
+        );
+        assert_eq!(options.discovery, DiscoveryPolicy::Disabled);
         assert!(options.debuginfod_urls.is_empty());
     }
 
