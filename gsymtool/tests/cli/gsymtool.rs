@@ -16,6 +16,14 @@ fn run_ok(arguments: &[&str]) -> Output {
     crate::tools::run(Command::new(env!("CARGO_BIN_EXE_gsymtool")).args(arguments))
 }
 
+fn run_ok_in(directory: &Path, arguments: &[&str]) -> Output {
+    crate::tools::run(
+        Command::new(env!("CARGO_BIN_EXE_gsymtool"))
+            .current_dir(directory)
+            .args(arguments),
+    )
+}
+
 fn warning_lines(output: &Output) -> Vec<&str> {
     std::str::from_utf8(&output.stderr)
         .unwrap()
@@ -365,6 +373,60 @@ fn cmdline_convert_lookup_dump_and_verify_end_to_end() {
 
     let verify = run_ok(&["verify", output.to_str().unwrap()]);
     assert!(String::from_utf8_lossy(&verify.stdout).contains("valid"));
+}
+
+#[test]
+fn no_discovery_keeps_split_dwarf_out_of_cli_conversion() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("split.c"),
+        "__attribute__((noinline)) int split_target(int value) { return value + 1; }\nint main(void) { return split_target(1); }\n",
+    )
+    .unwrap();
+    crate::tools::run(
+        Command::new(crate::tools::required_tool("gcc"))
+            .current_dir(directory.path())
+            .args(["-g", "-O1", "-gsplit-dwarf", "-o", "split", "split.c"]),
+    );
+    assert!(std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "dwo")
+    }));
+
+    let discovered = run_ok_in(
+        directory.path(),
+        &["convert", "split", "-o", "discovered.gsym"],
+    );
+    let discovered_stderr = String::from_utf8_lossy(&discovered.stderr);
+    assert!(
+        discovered_stderr.contains("debug info"),
+        "{discovered_stderr}"
+    );
+    assert!(
+        !discovered_stderr.contains("| 0 DWARF") && !discovered_stderr.contains("| 0 line rows"),
+        "{discovered_stderr}"
+    );
+
+    let isolated = run_ok_in(
+        directory.path(),
+        &["convert", "split", "-o", "isolated.gsym", "--no-discovery"],
+    );
+    let isolated_stderr = String::from_utf8_lossy(&isolated.stderr);
+    assert!(isolated_stderr.contains("| 0 DWARF"), "{isolated_stderr}");
+    assert!(
+        isolated_stderr.contains("| 0 line rows | 0 inline calls"),
+        "{isolated_stderr}"
+    );
+    assert!(
+        isolated_stderr.contains("has no usable .dwo or .dwp data"),
+        "{isolated_stderr}"
+    );
+
+    let bytes = std::fs::read(directory.path().join("isolated.gsym")).unwrap();
+    Gsym::parse(&bytes).unwrap().verify().unwrap();
 }
 
 #[test]
