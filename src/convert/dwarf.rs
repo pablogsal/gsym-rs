@@ -61,11 +61,17 @@ struct ImportContext<'a> {
     warnings: &'a mut Vec<ConversionWarning>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum DwoResolver<'path> {
+    Disabled,
+    Filesystem { base: &'path Path },
+}
+
 pub(super) struct DwarfImport<'files, 'data> {
     pub(super) file: &'files object::File<'data>,
     pub(super) supplementary: Option<&'files object::File<'data>>,
     pub(super) dwp: Option<&'files object::File<'data>>,
-    pub(super) dwo_base: Option<&'files Path>,
+    pub(super) dwo_resolver: DwoResolver<'files>,
     pub(super) layout: &'files AddressLayout,
     pub(super) executable_ranges: &'files [AddressRange],
     pub(super) builder: &'files mut GsymBuilder,
@@ -80,7 +86,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
         file,
         supplementary,
         dwp,
-        dwo_base,
+        dwo_resolver,
         layout,
         executable_ranges,
         builder,
@@ -146,7 +152,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
         if let Some(dwo_id) = unit.dwo_id {
             let skeleton_lines = collect_lines(&dwarf, &unit, context.builder, context.warnings)?;
             let mut failures = Vec::new();
-            if let Some(base) = dwo_base {
+            if let DwoResolver::Filesystem { base } = dwo_resolver {
                 match load_dwo(&dwarf, &unit, dwo_id, base, layout) {
                     Ok(Some((dwo_sections, dwo_endian))) => {
                         let mut dwo = dwo_sections.borrow(|section| {
@@ -157,8 +163,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
                         });
                         dwo.make_dwo(&dwarf);
                         import_split_units(&dwo, &skeleton_lines, &mut context)?;
-                        context.stats.split_dwarf_units =
-                            context.stats.split_dwarf_units.saturating_add(1);
+                        record_split_unit(&mut context);
                         continue;
                     }
                     Ok(None) => {}
@@ -169,8 +174,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
                 match package.find_cu(dwo_id, &dwarf).map_err(gimli_error) {
                     Ok(Some(dwo)) => {
                         import_split_units(&dwo, &skeleton_lines, &mut context)?;
-                        context.stats.split_dwarf_units =
-                            context.stats.split_dwarf_units.saturating_add(1);
+                        record_split_unit(&mut context);
                         continue;
                     }
                     Ok(None) => failures.push("unit is absent from the DWP index".into()),
@@ -199,6 +203,10 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
         context.warnings.push(ConversionWarning::NoInlineRecords);
     }
     Ok(())
+}
+
+const fn record_split_unit(context: &mut ImportContext<'_>) {
+    context.stats.split_dwarf_units = context.stats.split_dwarf_units.saturating_add(1);
 }
 
 fn import_split_units<R: Reader<Offset = usize>>(

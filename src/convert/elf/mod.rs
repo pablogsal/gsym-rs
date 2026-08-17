@@ -350,13 +350,13 @@ impl ElfConverter {
     /// Returns an error for malformed inputs, incompatible companion files,
     /// invalid DWARF, or unrepresentable GSYM records.
     pub fn convert(&self, inputs: ElfInputs<'_>) -> Result<ConversionReport> {
-        self.convert_inner(inputs, None)
+        self.convert_inner(inputs, super::dwarf::DwoResolver::Disabled)
     }
 
     fn convert_inner(
         &self,
         inputs: ElfInputs<'_>,
-        dwo_base: Option<&Path>,
+        dwo_resolver: super::dwarf::DwoResolver<'_>,
     ) -> Result<ConversionReport> {
         let image = parse_elf(inputs.image, ElfInputKind::Image)?;
         require_supported_kind(&image)?;
@@ -450,7 +450,7 @@ impl ElfConverter {
                 file: &debug,
                 supplementary: supplementary.as_ref(),
                 dwp: dwp.as_ref(),
-                dwo_base,
+                dwo_resolver,
                 layout: &layout,
                 executable_ranges: &layout.ranges,
                 builder: &mut builder,
@@ -542,9 +542,15 @@ impl ElfConverter {
         let dwp = dwarf_discovery_enabled
             .then(|| discover_dwp(image_path, debug_path))
             .flatten();
-        let dwo_base = dwarf_discovery_enabled
-            .then(|| debug_path.parent())
-            .flatten();
+        let dwo_resolver = if dwarf_discovery_enabled {
+            debug_path
+                .parent()
+                .map_or(super::dwarf::DwoResolver::Disabled, |base| {
+                    super::dwarf::DwoResolver::Filesystem { base }
+                })
+        } else {
+            super::dwarf::DwoResolver::Disabled
+        };
         let mut report = self.convert_inner(
             ElfInputs {
                 image: &image_bytes,
@@ -559,7 +565,7 @@ impl ElfConverter {
                     .map(|artifact| artifact.bytes.as_slice()),
                 dwp: dwp.as_ref().map(|artifact| artifact.bytes.as_slice()),
             },
-            dwo_base,
+            dwo_resolver,
         )?;
         report.warnings.extend(discovery.warnings);
         report.warnings.extend(supplementary_discovery.warnings);
