@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4 - 2026-08-17
+
+### Added
+
+- Publish `gsymtool` with the `gsym-rs` crate so `cargo install gsym-rs --locked` installs the complete command-line tool.
+
+### Changed
+
+- Enable conversion, memory mapping, and debuginfod in the default feature set.
+- Keep binary release metadata, SBOM generation, and fuzzing aligned with the unified Cargo package.
+
 ## 0.1.3 - 2026-08-17
 
 ### Fixed
