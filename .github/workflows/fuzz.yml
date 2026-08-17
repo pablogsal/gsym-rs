@@ -31,6 +31,7 @@ permissions:
   contents: read
 
 env:
+  ASAN_OPTIONS: allocator_may_return_null=1
   CARGO_TERM_COLOR: always
 
 defaults:
