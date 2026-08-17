@@ -113,7 +113,7 @@ impl<'data> ElfInputs<'data> {
 ///
 /// Build from [`Default`] and adjust the fields you care about. The defaults
 /// import symbols and DWARF with inline information, search for companion debug
-/// files, and read three environment variables: `DEBUGINFOD_URLS` for the
+/// files, and read two environment variables: `DEBUGINFOD_URLS` for the
 /// servers to try, which is empty unless set, and `DEBUGINFOD_CACHE_PATH` for
 /// the download cache. Clear
 /// [`debuginfod_urls`](Self::debuginfod_urls) or set
@@ -174,17 +174,15 @@ impl Default for DwarfImportOptions {
 /// Companion-file discovery policy for path-based conversion.
 ///
 /// Applies to [`ElfConverter::convert_path`] only; [`ElfConverter::convert`]
-/// never searches. `Disabled` turns off the search for a separate debug file
-/// and for a `.dwp` package. A `.gnu_debugaltlink` reference inside the debug
-/// data is still resolved, so a conversion that must not reach the network also
-/// needs [`ConversionOptions::debuginfod_urls`] cleared.
+/// never searches. `Disabled` prevents filesystem and network searches for
+/// separate debug files, supplementary files, and split-DWARF data.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DiscoveryPolicy {
     /// Convert only the requested image path.
     Disabled,
     #[default]
-    /// Search debug links, build-ID roots, split-DWARF paths, and debuginfod.
+    /// Search separate, supplementary, split-DWARF, and remote debug sources.
     Enabled,
 }
 
@@ -473,9 +471,8 @@ impl ElfConverter {
 
     /// Converts an ELF path and discovers supported companion debug files.
     ///
-    /// Searches for separate debug information unless
-    /// [`DiscoveryPolicy::Disabled`] is set, then converts the image together
-    /// with whatever was found. The chosen paths are reported in
+    /// Searches for companion debug information unless
+    /// [`DiscoveryPolicy::Disabled`] is set. The chosen paths are reported in
     /// [`ConversionReport::discovered_debug`] and its siblings, and problems
     /// encountered while searching appear as warnings rather than errors.
     ///
@@ -506,7 +503,10 @@ impl ElfConverter {
         let image_path = image_path.as_ref();
         let image_bytes = read_file(image_path, "read ELF image")?;
         let discovery_cache = self.discovery_cache.get_or_init(Arc::default);
-        let discovery = if self.options.discovery == DiscoveryPolicy::Enabled {
+        let discovery_enabled = self.options.discovery == DiscoveryPolicy::Enabled;
+        let companion_discovery_enabled =
+            discovery_enabled && (self.options.include_symbols || self.options.dwarf.is_some());
+        let discovery = if companion_discovery_enabled {
             discover_separate_debug(
                 image_path,
                 &image_bytes,
@@ -525,22 +525,24 @@ impl ElfConverter {
             .artifact
             .as_ref()
             .map_or(image_bytes.as_slice(), |artifact| artifact.bytes.as_slice());
-        let supplementary_discovery = discover_supplementary(
-            debug_path,
-            debug_source,
-            &self.options,
-            discovery_cache,
-            &mut observer,
-        )?;
-        let dwp = (self.options.discovery == DiscoveryPolicy::Enabled)
+        let dwarf_discovery_enabled = discovery_enabled && self.options.dwarf.is_some();
+        let supplementary_discovery = if dwarf_discovery_enabled {
+            discover_supplementary(
+                debug_path,
+                debug_source,
+                &self.options,
+                discovery_cache,
+                &mut observer,
+            )?
+        } else {
+            Discovery::default()
+        };
+        let dwp = dwarf_discovery_enabled
             .then(|| discover_dwp(image_path, debug_path))
             .flatten();
-        let dwo_base = discovery
-            .artifact
-            .as_ref()
-            .map(|artifact| artifact.path.as_path())
-            .or(Some(image_path))
-            .and_then(Path::parent);
+        let dwo_base = dwarf_discovery_enabled
+            .then(|| debug_path.parent())
+            .flatten();
         let mut report = self.convert_inner(
             ElfInputs {
                 image: &image_bytes,

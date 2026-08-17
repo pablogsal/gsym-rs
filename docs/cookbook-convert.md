@@ -48,15 +48,17 @@ for it, in this order, unless
   checked against the requested build ID and the image's architecture, and
   cached under `DEBUGINFOD_CACHE_PATH` or a temporary root. This is the only
   step that touches the network.
-- `.gnu_debugdata`, the XZ-compressed mini-debug ELF some distributions embed.
-  It is decompressed with a 1 GiB default bound and validated against the image
-  before use.
+
+The XZ-compressed `.gnu_debugdata` mini-debug ELF used by some distributions is
+embedded in the requested image rather than discovered externally. It remains
+available under either policy, is decompressed with a 1 GiB default bound, and
+is validated against the image before use.
 
 Two further kinds of companion are resolved from whichever debug file is
 selected: `.gnu_debugaltlink` supplementary objects, and split DWARF as either
 individual `.dwo` files by path or an indexed `.dwp` package, supplied
-explicitly or found beside the image. `Disabled` stops the `.dwp` search, but a
-`.gnu_debugaltlink` reference is still followed.
+explicitly or found beside the image. `Disabled` stops every external companion
+search, including supplementary objects and both forms of split DWARF.
 
 The report says what was chosen, which is worth logging when a conversion
 produces unexpected output:
@@ -94,10 +96,8 @@ options.dwarf = Some(DwarfImportOptions {
     call_sites: true, // off by default
 });
 
-// Image only: no debug links, no build-ID roots, and no network.
+// Image only: no external debug, supplementary, or split-DWARF files and no network.
 options.discovery = DiscoveryPolicy::Disabled;
-options.debug_directories.clear();
-options.debuginfod_urls.clear();
 
 // Tighter bounds than the 1 GiB defaults.
 options.debuginfod_max_download_size = 64 * 1024 * 1024;

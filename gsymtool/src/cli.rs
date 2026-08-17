@@ -222,13 +222,13 @@ pub(crate) struct SourceToggles {
 /// How conversion discovers local and remote debug companions.
 #[derive(Debug, Args)]
 pub(crate) struct DiscoveryToggles {
-    /// Do not search debug links, build-ID roots, DWO/DWP paths, or debuginfod.
+    /// Do not search for separate, supplementary, DWO/DWP, or remote debug data.
     #[arg(long)]
     pub(crate) no_discovery: bool,
 
     /// Do not make debuginfod network requests.
     ///
-    /// Local debug links, build-ID roots, and DWO/DWP paths are still searched.
+    /// Local separate, supplementary, and DWO/DWP paths are still searched.
     #[arg(long, conflicts_with = "no_discovery")]
     pub(crate) no_debuginfod: bool,
 }

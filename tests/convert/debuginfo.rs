@@ -4,7 +4,9 @@
 use std::fmt::Write as _;
 use std::process::Command;
 
-use gsym::convert::{ConversionOptions, ConversionWarning, DiscoveryEvent, ElfConverter};
+use gsym::convert::{
+    ConversionOptions, ConversionWarning, DiscoveryEvent, DiscoveryPolicy, ElfConverter,
+};
 use object::Object;
 
 use crate::elf::retarget_machine;
@@ -303,6 +305,30 @@ fn discovers_and_validates_gnu_debuglink_companions() {
 }
 
 #[test]
+fn disabled_discovery_ignores_gnu_debuglink_companions() {
+    let directory = tempfile::tempdir().unwrap();
+    let (image, _debug) = compile_debug_pair(directory.path());
+    let stripped = directory.path().join("discover.stripped");
+    run(Command::new("objcopy").current_dir(directory.path()).args([
+        "--strip-debug",
+        "--add-gnu-debuglink=discover.debug",
+        image.to_str().unwrap(),
+        stripped.to_str().unwrap(),
+    ]));
+    let options = ConversionOptions {
+        include_symbols: false,
+        discovery: DiscoveryPolicy::Disabled,
+        ..ConversionOptions::default()
+    };
+
+    let report = ElfConverter::new(options).convert_path(&stripped).unwrap();
+
+    assert!(report.discovered_debug.is_none());
+    assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
+    assert!(report.builder.functions().is_empty());
+}
+
+#[test]
 fn discovers_build_id_debug_files_under_configured_roots() {
     let directory = tempfile::tempdir().unwrap();
     let (image, debug) = compile_debug_pair(directory.path());
@@ -500,6 +526,7 @@ fn rejects_debuginfod_responses_with_the_wrong_build_id() {
 fn convert_debugaltlink_pair(
     directory: &std::path::Path,
     linked_name: &str,
+    options: ConversionOptions,
 ) -> gsym::convert::ConversionReport {
     let yaml2obj = crate::tools::required_tool("yaml2obj");
     let build = |source: &str, name: &str| {
@@ -535,15 +562,17 @@ fn convert_debugaltlink_pair(
             linked.to_str().unwrap(),
         ]),
     );
-    ElfConverter::new(ConversionOptions::default())
-        .convert_path(&linked)
-        .unwrap()
+    ElfConverter::new(options).convert_path(&linked).unwrap()
 }
 
 #[test]
 fn resolves_names_through_gnu_debugaltlink_supplementary_files() {
     let directory = tempfile::tempdir().unwrap();
-    let report = convert_debugaltlink_pair(directory.path(), "supplementary.debug");
+    let report = convert_debugaltlink_pair(
+        directory.path(),
+        "supplementary.debug",
+        ConversionOptions::default(),
+    );
 
     assert_eq!(
         report.discovered_supplementary.as_deref(),
@@ -559,11 +588,54 @@ fn resolves_names_through_gnu_debugaltlink_supplementary_files() {
     assert_eq!(function.range, gsym::AddressRange::new(0x1000, 0x1100));
 }
 
+#[test]
+fn disabled_discovery_ignores_gnu_debugaltlink_companions() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = convert_debugaltlink_pair(
+        directory.path(),
+        "supplementary.debug",
+        ConversionOptions {
+            discovery: DiscoveryPolicy::Disabled,
+            ..ConversionOptions::default()
+        },
+    );
+
+    assert!(report.discovered_supplementary.is_none());
+    assert!(
+        report
+            .builder
+            .functions()
+            .iter()
+            .all(|function| function.name != b"supplementary_origin"),
+        "a name was resolved while discovery was disabled"
+    );
+}
+
+#[test]
+fn disabled_dwarf_import_ignores_gnu_debugaltlink_companions() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = convert_debugaltlink_pair(
+        directory.path(),
+        "supplementary.debug",
+        ConversionOptions {
+            dwarf: None,
+            ..ConversionOptions::default()
+        },
+    );
+
+    assert!(report.discovered_supplementary.is_none());
+    assert_eq!(report.stats.dwarf_functions, 0);
+}
+
 /// A link nothing resolves must leave the reference unresolved, not invented.
 #[test]
 fn unresolved_gnu_debugaltlink_links_convert_without_supplementary_names() {
     let directory = tempfile::tempdir().unwrap();
-    let report = convert_debugaltlink_pair(directory.path(), "absent.debug");
+    let report = convert_debugaltlink_pair(
+        directory.path(),
+        "absent.debug",
+        ConversionOptions::default(),
+    );
 
     assert!(report.discovered_supplementary.is_none());
     assert!(

@@ -4,7 +4,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use gsym::Error;
-use gsym::convert::{ConversionOptions, ConversionWarning, ElfConverter, ElfInputs};
+use gsym::convert::{
+    ConversionOptions, ConversionWarning, DiscoveryPolicy, ElfConverter, ElfInputs,
+};
 
 use crate::elf::{convert, find_function};
 use crate::tools::{required_tool, run};
@@ -32,14 +34,24 @@ fn run_bounded(command: &mut Command, timeout: Duration) {
 #[test]
 fn follows_split_dwarf_units_and_imports_dwo_functions() {
     let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("split.c");
-    let image = directory.path().join("split");
+    let image = compile_split_dwarf_image(directory.path());
+
+    let report = ElfConverter::new(ConversionOptions::default())
+        .convert_path(&image)
+        .unwrap();
+    assert!(report.stats.dwarf_functions > 0, "{:?}", report.warnings);
+    assert!(find_function(&report, b"split_target").is_some());
+}
+
+fn compile_split_dwarf_image(directory: &std::path::Path) -> std::path::PathBuf {
+    let source = directory.join("split.c");
+    let image = directory.join("split");
     std::fs::write(
         &source,
         "static inline __attribute__((always_inline)) int split_inline(int x) { return x + 3; }\n__attribute__((noinline)) int split_target(int x) { return split_inline(x); }\nint main(void) { return split_target(1); }\n",
     )
     .unwrap();
-    run(Command::new("cc").current_dir(directory.path()).args([
+    run(Command::new("cc").current_dir(directory).args([
         "-g",
         "-O2",
         "-gsplit-dwarf",
@@ -47,13 +59,29 @@ fn follows_split_dwarf_units_and_imports_dwo_functions() {
         image.to_str().unwrap(),
         source.to_str().unwrap(),
     ]));
-    assert!(!dwo_files(directory.path()).is_empty());
+    assert!(!dwo_files(directory).is_empty());
+    image
+}
 
-    let report = ElfConverter::new(ConversionOptions::default())
-        .convert_path(&image)
-        .unwrap();
-    assert!(report.stats.dwarf_functions > 0, "{:?}", report.warnings);
-    assert!(find_function(&report, b"split_target").is_some());
+#[test]
+fn disabled_discovery_ignores_individual_dwo_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = compile_split_dwarf_image(directory.path());
+    let options = ConversionOptions {
+        include_symbols: false,
+        discovery: DiscoveryPolicy::Disabled,
+        ..ConversionOptions::default()
+    };
+
+    let report = ElfConverter::new(options).convert_path(&image).unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, ConversionWarning::SplitDwarfUnavailable { .. }))
+    );
+    assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
+    assert!(report.builder.functions().is_empty());
 }
 
 #[test]
@@ -259,6 +287,31 @@ fn discovers_dwp_packages_after_individual_dwo_files_are_unavailable() {
         "{:?}",
         report.warnings
     );
+
+    let disabled = ElfConverter::new(ConversionOptions {
+        include_symbols: false,
+        discovery: DiscoveryPolicy::Disabled,
+        ..ConversionOptions::default()
+    })
+    .convert_path(&image)
+    .unwrap();
+    assert!(disabled.discovered_dwp.is_none());
+    assert!(
+        disabled
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, ConversionWarning::SplitDwarfUnavailable { .. }))
+    );
+    assert_eq!(disabled.stats.dwarf_functions, 0, "{:?}", disabled.warnings);
+
+    let symbols_only = ElfConverter::new(ConversionOptions {
+        dwarf: None,
+        ..ConversionOptions::default()
+    })
+    .convert_path(&image)
+    .unwrap();
+    assert!(symbols_only.discovered_dwp.is_none());
+    assert_eq!(symbols_only.stats.dwarf_functions, 0);
 }
 
 fn compile_split_units(
