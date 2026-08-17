@@ -12,6 +12,8 @@ on:
       - CHANGELOG.md
       - Cargo.lock
       - Cargo.toml
+      - fuzz/Cargo.lock
+      - fuzz/Cargo.toml
       - LICENSE-APACHE
       - LICENSE-MIT
       - RELEASE.md

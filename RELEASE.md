@@ -14,8 +14,12 @@ from GitHub Actions; do not create or push the tag manually.
 
 ## Prepare
 
-1. Update the version in `Cargo.toml` to `X.Y.Z`, then run
-   `cargo update --workspace`.
+1. Update the version in `Cargo.toml` to `X.Y.Z`, then refresh both workspaces:
+
+   ```bash
+   cargo update --workspace
+   cargo update --manifest-path fuzz/Cargo.toml --workspace
+   ```
 2. Move the relevant entries from `## Unreleased` in `CHANGELOG.md` into
    `## X.Y.Z - YYYY-MM-DD`. That section becomes the GitHub release notes.
 3. Run:
@@ -24,6 +28,7 @@ from GitHub Actions; do not create or push the tag manually.
    python3 scripts/release_contract.py --tag dry-run
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+   cargo clippy --manifest-path fuzz/Cargo.toml --bins --locked -- -D warnings
    cargo test --workspace --all-features --locked
    cargo publish --package gsym-rs --dry-run --locked
    ```
