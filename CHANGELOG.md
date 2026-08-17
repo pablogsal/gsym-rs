@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5 - 2026-08-17
+
+### Fixed
+
+- Make disabled discovery ignore supplementary debug objects, individual DWO files, DWP packages, separate debug files, and debuginfod sources consistently.
+- Skip supplementary and split-DWARF searches when DWARF import is disabled or no enabled source can use a companion file.
+
 ## 0.1.4 - 2026-08-17
 
 ### Added
