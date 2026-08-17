@@ -406,7 +406,9 @@ fn no_discovery_keeps_split_dwarf_out_of_cli_conversion() {
         "{discovered_stderr}"
     );
     assert!(
-        !discovered_stderr.contains("| 0 DWARF") && !discovered_stderr.contains("| 0 line rows"),
+        !discovered_stderr.contains("| 0 DWARF")
+            && !discovered_stderr.contains("| 0 line rows")
+            && discovered_stderr.contains("| 1 split units"),
         "{discovered_stderr}"
     );
 
@@ -417,7 +419,7 @@ fn no_discovery_keeps_split_dwarf_out_of_cli_conversion() {
     let isolated_stderr = String::from_utf8_lossy(&isolated.stderr);
     assert!(isolated_stderr.contains("| 0 DWARF"), "{isolated_stderr}");
     assert!(
-        isolated_stderr.contains("| 0 line rows | 0 inline calls"),
+        isolated_stderr.contains("| 0 line rows | 0 inline calls | 0 split units"),
         "{isolated_stderr}"
     );
     assert!(

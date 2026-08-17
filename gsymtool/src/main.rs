@@ -180,13 +180,18 @@ fn convert_single(
             Count(stats.symbol_functions),
             Count(stats.dwarf_functions)
         )?;
-        if source_files != 0 || stats.line_rows != 0 || stats.inline_nodes != 0 {
+        if source_files != 0
+            || stats.line_rows != 0
+            || stats.inline_nodes != 0
+            || stats.split_dwarf_units != 0
+        {
             writeln!(
                 stderr,
-                "  debug info   {} source files | {} line rows | {} inline calls",
+                "  debug info   {} source files | {} line rows | {} inline calls | {} split units",
                 Count(source_files),
                 Count(stats.line_rows),
-                Count(stats.inline_nodes)
+                Count(stats.inline_nodes),
+                Count(stats.split_dwarf_units)
             )?;
         }
         if stats.rejected_ranges != 0 {

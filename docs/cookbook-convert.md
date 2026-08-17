@@ -156,9 +156,10 @@ use gsym::convert::ElfConverter;
 let report = ElfConverter::default().convert_path("./app")?;
 let stats = report.stats;
 println!(
-    "symbols={} dwarf={} lines={} inlines={} rejected={}",
+    "symbols={} dwarf={} split={} lines={} inlines={} rejected={}",
     stats.symbol_functions,
     stats.dwarf_functions,
+    stats.split_dwarf_units,
     stats.line_rows,
     stats.inline_nodes,
     stats.rejected_ranges,

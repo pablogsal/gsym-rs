@@ -157,6 +157,8 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
                         });
                         dwo.make_dwo(&dwarf);
                         import_split_units(&dwo, &skeleton_lines, &mut context)?;
+                        context.stats.split_dwarf_units =
+                            context.stats.split_dwarf_units.saturating_add(1);
                         continue;
                     }
                     Ok(None) => {}
@@ -167,6 +169,8 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
                 match package.find_cu(dwo_id, &dwarf).map_err(gimli_error) {
                     Ok(Some(dwo)) => {
                         import_split_units(&dwo, &skeleton_lines, &mut context)?;
+                        context.stats.split_dwarf_units =
+                            context.stats.split_dwarf_units.saturating_add(1);
                         continue;
                     }
                     Ok(None) => failures.push("unit is absent from the DWP index".into()),
