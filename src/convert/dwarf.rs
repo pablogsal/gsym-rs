@@ -34,6 +34,17 @@ use crate::{ElfInputKind, Error, GsymBuilder, Result};
 
 const DW_AT_LLVM_STMT_SEQUENCE: gimli::DwAt = gimli::DwAt(0x3e0c);
 
+type SectionReader<'data, 'relocations> =
+    RelocateReader<EndianSlice<'data, RunTimeEndian>, &'relocations DwarfRelocations>;
+
+fn runtime_endian(file: &object::File<'_>) -> RunTimeEndian {
+    if file.is_little_endian() {
+        RunTimeEndian::Little
+    } else {
+        RunTimeEndian::Big
+    }
+}
+
 fn unsigned_attribute<R: Reader<Offset = usize>>(
     entry: &DebuggingInformationEntry<R>,
     name: gimli::DwAt,
@@ -67,6 +78,12 @@ pub(super) enum DwoResolver<'path> {
     Filesystem { base: &'path Path },
 }
 
+enum LooseDwoImport {
+    Imported,
+    Unavailable,
+    Failed(Box<str>),
+}
+
 pub(super) struct DwarfImport<'files, 'data> {
     pub(super) file: &'files object::File<'data>,
     pub(super) supplementary: Option<&'files object::File<'data>>,
@@ -95,11 +112,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
         stats,
         warnings,
     } = request;
-    let endian = if file.is_little_endian() {
-        RunTimeEndian::Little
-    } else {
-        RunTimeEndian::Big
-    };
+    let endian = runtime_endian(file);
     let sections = DwarfSections::load(|id| load_section(file, id, layout))?;
     let supplementary_sections = supplementary
         .map(|file| DwarfSections::load(|id| load_section(file, id, layout)))
@@ -110,13 +123,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
             &section.relocations,
         )
     });
-    let package_endian = dwp.map(|file| {
-        if file.is_little_endian() {
-            RunTimeEndian::Little
-        } else {
-            RunTimeEndian::Big
-        }
-    });
+    let package_endian = dwp.map(runtime_endian);
     let package_sections = dwp
         .map(|file| DwarfPackageSections::load(|id| load_dwo_section(file, id, layout)))
         .transpose()?;
@@ -153,28 +160,31 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
             let skeleton_lines = collect_lines(&dwarf, &unit, context.builder, context.warnings)?;
             let mut failures = Vec::new();
             if let DwoResolver::Filesystem { base } = dwo_resolver {
-                match load_dwo(&dwarf, &unit, dwo_id, base, layout) {
-                    Ok(Some((dwo_sections, dwo_endian))) => {
-                        let mut dwo = dwo_sections.borrow(|section| {
-                            RelocateReader::new(
-                                EndianSlice::new(section.data.as_ref(), dwo_endian),
-                                &section.relocations,
-                            )
-                        });
-                        dwo.make_dwo(&dwarf);
-                        import_split_units(&dwo, &skeleton_lines, &mut context)?;
-                        record_split_unit(&mut context);
-                        continue;
-                    }
-                    Ok(None) => {}
-                    Err(error) => failures.push(format!("DWO: {error}").into_boxed_str()),
+                match try_import_loose_dwo(
+                    &dwarf,
+                    &unit,
+                    dwo_id,
+                    base,
+                    layout,
+                    &skeleton_lines,
+                    &mut context,
+                )? {
+                    LooseDwoImport::Imported => continue,
+                    LooseDwoImport::Unavailable => {}
+                    LooseDwoImport::Failed(reason) => failures.push(reason),
                 }
             }
             if let Some(package) = &dwp_package {
                 match package.find_cu(dwo_id, &dwarf).map_err(gimli_error) {
                     Ok(Some(dwo)) => {
-                        import_split_units(&dwo, &skeleton_lines, &mut context)?;
-                        record_split_unit(&mut context);
+                        let split_unit = find_split_unit(&dwo, dwo_id)?;
+                        import_split_unit_for_skeleton(
+                            &dwo,
+                            split_unit,
+                            &unit,
+                            &skeleton_lines,
+                            &mut context,
+                        )?;
                         continue;
                     }
                     Ok(None) => failures.push("unit is absent from the DWP index".into()),
@@ -205,20 +215,72 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
     Ok(())
 }
 
-const fn record_split_unit(context: &mut ImportContext<'_>) {
-    context.stats.split_dwarf_units = context.stats.split_dwarf_units.saturating_add(1);
-}
-
-fn import_split_units<R: Reader<Offset = usize>>(
-    dwarf: &Dwarf<R>,
+fn try_import_loose_dwo<'data, 'relocations>(
+    parent: &Dwarf<SectionReader<'data, 'relocations>>,
+    skeleton_unit: &Unit<SectionReader<'data, 'relocations>>,
+    dwo_id: gimli::DwoId,
+    base: &Path,
+    layout: &AddressLayout,
     skeleton_lines: &UnitLines,
     context: &mut ImportContext<'_>,
-) -> Result<()> {
+) -> Result<LooseDwoImport> {
+    let (sections, endian) = match load_dwo(parent, skeleton_unit, dwo_id, base, layout) {
+        Ok(Some(dwo)) => dwo,
+        Ok(None) => return Ok(LooseDwoImport::Unavailable),
+        Err(error) => return Ok(LooseDwoImport::Failed(format!("DWO: {error}").into())),
+    };
+    let mut dwo = sections.borrow(|section| {
+        RelocateReader::new(
+            EndianSlice::new(section.data.as_ref(), endian),
+            &section.relocations,
+        )
+    });
+    dwo.make_dwo(parent);
+    let split_unit = match find_split_unit(&dwo, dwo_id) {
+        Ok(unit) => unit,
+        Err(error) => return Ok(LooseDwoImport::Failed(format!("DWO: {error}").into())),
+    };
+    import_split_unit_for_skeleton(&dwo, split_unit, skeleton_unit, skeleton_lines, context)?;
+    Ok(LooseDwoImport::Imported)
+}
+
+fn find_split_unit<R: Reader<Offset = usize>>(
+    dwarf: &Dwarf<R>,
+    expected_id: gimli::DwoId,
+) -> Result<Unit<R>> {
+    let mut matched_unit = None;
     let mut headers = dwarf.units();
     while let Some(header) = headers.next().map_err(gimli_error)? {
         let unit = dwarf.unit(header).map_err(gimli_error)?;
-        import_split_unit(dwarf, &unit, skeleton_lines, context)?;
+        if unit.dwo_id != Some(expected_id) {
+            continue;
+        }
+        if matched_unit.is_some() {
+            return Err(Error::malformed(
+                "split DWARF unit",
+                format!("duplicate ID {:#x}", expected_id.0),
+            ));
+        }
+        matched_unit = Some(unit);
     }
+    matched_unit.ok_or_else(|| {
+        Error::malformed(
+            "split DWARF unit",
+            format!("ID mismatch: expected {:#x}", expected_id.0),
+        )
+    })
+}
+
+fn import_split_unit_for_skeleton<R: Reader<Offset = usize>>(
+    dwarf: &Dwarf<R>,
+    mut split_unit: Unit<R>,
+    skeleton_unit: &Unit<R>,
+    skeleton_lines: &UnitLines,
+    context: &mut ImportContext<'_>,
+) -> Result<()> {
+    split_unit.copy_relocated_attributes(skeleton_unit);
+    import_split_unit(dwarf, &split_unit, skeleton_lines, context)?;
+    context.stats.split_dwarf_units = context.stats.split_dwarf_units.saturating_add(1);
     Ok(())
 }
 
@@ -427,37 +489,40 @@ fn parse_dwo(
         input: ElfInputKind::Dwo,
         source: crate::ParserError::object(source),
     })?;
-    let endian = if file.is_little_endian() {
-        RunTimeEndian::Little
-    } else {
-        RunTimeEndian::Big
-    };
+    let endian = runtime_endian(&file);
     let sections = DwarfSections::load(|id| load_dwo_section_owned(&file, id, layout))?;
-    let borrowed = sections.borrow(|section| {
-        RelocateReader::new(
-            EndianSlice::new(section.data.as_ref(), endian),
-            &section.relocations,
-        )
-    });
-    let header = borrowed
-        .units()
-        .next()
-        .map_err(gimli_error)?
-        .ok_or_else(|| {
-            Error::malformed(
-                "DWO file",
-                format!("no compilation unit in {}", path.display()),
+    let (saw_unit, found) = {
+        let borrowed = sections.borrow(|section| {
+            RelocateReader::new(
+                EndianSlice::new(section.data.as_ref(), endian),
+                &section.relocations,
             )
-        })?;
-    let dwo_unit = borrowed.unit(header).map_err(gimli_error)?;
-    if dwo_unit.dwo_id != Some(expected_id) {
+        });
+        let mut found = false;
+        let mut saw_unit = false;
+        let mut headers = borrowed.units();
+        while let Some(header) = headers.next().map_err(gimli_error)? {
+            saw_unit = true;
+            let dwo_unit = borrowed.unit(header).map_err(gimli_error)?;
+            if dwo_unit.dwo_id == Some(expected_id) {
+                found = true;
+                break;
+            }
+        }
+        (saw_unit, found)
+    };
+    if !saw_unit {
+        return Err(Error::malformed(
+            "DWO file",
+            format!("no compilation unit in {}", path.display()),
+        ));
+    }
+    if !found {
         return Err(Error::malformed(
             "DWO file",
             format!("ID mismatch for {}", path.display()),
         ));
     }
-    drop(dwo_unit);
-    drop(borrowed);
     Ok((sections, endian))
 }
 
