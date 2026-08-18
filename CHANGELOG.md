@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.6 - 2026-08-18
+
+### Added
+
+- Report the number of split-DWARF units imported from DWO and DWP data in conversion statistics and `gsymtool` output.
+
+### Fixed
+
+- Copy relocated skeleton attributes into split units so indexed addresses and pre-DWARF 5 range lists use the linked image's bases.
+- Match loose and packaged split units by DWO ID, reject ambiguous matches, and fall back from incompatible loose DWO files to DWP packages.
+- Keep byte-input conversion isolated from filesystem DWO discovery through an explicit resolver capability.
+
+### Changed
+
+- Validate the fuzz workspace lockfile as part of the release contract.
+
 ## 0.1.5 - 2026-08-17
 
 ### Fixed
