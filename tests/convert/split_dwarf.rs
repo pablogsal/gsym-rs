@@ -7,9 +7,13 @@ use gsym::Error;
 use gsym::convert::{
     ConversionOptions, ConversionWarning, DiscoveryPolicy, ElfConverter, ElfInputs,
 };
+use object::endian::Endian;
+use object::{Object, ObjectSection, ObjectSymbol};
 
 use crate::elf::{convert, find_function};
 use crate::tools::{required_tool, run};
+
+const SPLIT_FUNCTIONS: &[&[u8]] = &[b"split_a", b"split_b", b"split_c", b"main"];
 
 /// This caps `llvm-dwp`, which builds the fixtures: it has been seen to hang on
 /// some inputs, and a hung packager should fail the test rather than the run.
@@ -32,16 +36,171 @@ fn run_bounded(command: &mut Command, timeout: Duration) {
 }
 
 #[test]
-fn follows_split_dwarf_units_and_imports_dwo_functions() {
+fn copies_skeleton_address_base_for_dwo_and_dwp() {
     let directory = tempfile::tempdir().unwrap();
     let image = compile_split_dwarf_image(directory.path());
+    let dwo = dwo_files(directory.path()).remove(0);
+    assert_uses_indexed_split_addresses(&image, &dwo);
 
-    let report = ElfConverter::new(ConversionOptions::default())
+    let report = ElfConverter::new(dwarf_only_options())
         .convert_path(&image)
         .unwrap();
-    assert!(report.stats.dwarf_functions > 0, "{:?}", report.warnings);
     assert_eq!(report.stats.split_dwarf_units, 1);
-    assert!(find_function(&report, b"split_target").is_some());
+    assert_function_addresses(&report, &image, SPLIT_FUNCTIONS);
+
+    let dwp = image.with_extension("dwp");
+    package_dwo_files(std::slice::from_ref(&dwo), &dwp);
+    std::fs::rename(&dwo, dwo.with_extension("dwo.unavailable")).unwrap();
+
+    let report = ElfConverter::new(dwarf_only_options())
+        .convert_path(&image)
+        .unwrap();
+    assert_eq!(report.discovered_dwp.as_deref(), Some(dwp.as_path()));
+    assert_eq!(report.stats.split_dwarf_units, 1);
+    assert_function_addresses(&report, &image, SPLIT_FUNCTIONS);
+}
+
+#[test]
+fn loose_dwo_selects_the_split_unit_with_the_matching_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = compile_split_dwarf_image(directory.path());
+    let dwo = dwo_files(directory.path()).remove(0);
+    prepend_unrelated_split_unit(&dwo, directory.path());
+
+    let report = ElfConverter::new(dwarf_only_options())
+        .convert_path(&image)
+        .unwrap();
+    assert_eq!(report.stats.split_dwarf_units, 1);
+    assert_function_addresses(&report, &image, SPLIT_FUNCTIONS);
+}
+
+fn prepend_unrelated_split_unit(dwo: &std::path::Path, directory: &std::path::Path) {
+    let dwo_bytes = std::fs::read(dwo).unwrap();
+    let dwo_file = object::File::parse(&*dwo_bytes).unwrap();
+    let endian = dwo_file.endianness();
+    let info = directory.join("debug-info.dwo.bin");
+    let abbrev = directory.join("debug-abbrev.dwo.bin");
+    let original_info = dwo_file
+        .section_by_name(".debug_info.dwo")
+        .unwrap()
+        .uncompressed_data()
+        .unwrap();
+    let mut abbreviations = dwo_file
+        .section_by_name(".debug_abbrev.dwo")
+        .unwrap()
+        .uncompressed_data()
+        .unwrap()
+        .into_owned();
+    let abbreviation_offset = u32::try_from(abbreviations.len()).unwrap();
+
+    let mut combined_info = Vec::with_capacity(21 + original_info.len());
+    combined_info.extend_from_slice(&endian.write_u32(17));
+    combined_info.extend_from_slice(&endian.write_u16(5));
+    combined_info.push(gimli::constants::DW_UT_split_compile.0);
+    combined_info.push(8);
+    combined_info.extend_from_slice(&endian.write_u32(abbreviation_offset));
+    combined_info.extend_from_slice(&endian.write_u64(0x0123_4567_89ab_cdef));
+    combined_info.push(1);
+    combined_info.extend_from_slice(&original_info);
+    std::fs::write(&info, combined_info).unwrap();
+
+    abbreviations.extend_from_slice(&[
+        1,
+        u8::try_from(gimli::constants::DW_TAG_compile_unit.0).unwrap(),
+        gimli::constants::DW_CHILDREN_no.0,
+        0,
+        0,
+        0,
+    ]);
+    std::fs::write(&abbrev, abbreviations).unwrap();
+    let rewritten = directory.join("multiple-units.dwo");
+    run(Command::new("objcopy")
+        .arg(format!(
+            "--update-section=.debug_info.dwo={}",
+            info.display()
+        ))
+        .arg(format!(
+            "--update-section=.debug_abbrev.dwo={}",
+            abbrev.display()
+        ))
+        .arg(dwo)
+        .arg(&rewritten));
+    std::fs::rename(rewritten, dwo).unwrap();
+}
+
+fn assert_uses_indexed_split_addresses(image: &std::path::Path, dwo: &std::path::Path) {
+    let image_bytes = std::fs::read(image).unwrap();
+    let image_file = object::File::parse(&*image_bytes).unwrap();
+    let endian = if image_file.is_little_endian() {
+        gimli::RunTimeEndian::Little
+    } else {
+        gimli::RunTimeEndian::Big
+    };
+    let image_sections = gimli::DwarfSections::load(|id| -> object::Result<Vec<u8>> {
+        image_file.section_by_name(id.name()).map_or_else(
+            || Ok(Vec::new()),
+            |section| Ok(section.uncompressed_data()?.into_owned()),
+        )
+    })
+    .unwrap();
+    let image_dwarf = image_sections.borrow(|section| gimli::EndianSlice::new(section, endian));
+    let skeleton_header = image_dwarf.units().next().unwrap().unwrap();
+    let skeleton = image_dwarf.unit(skeleton_header).unwrap();
+    assert_ne!(skeleton.addr_base.0, 0);
+
+    let dwo_bytes = std::fs::read(dwo).unwrap();
+    let dwo_file = object::File::parse(&*dwo_bytes).unwrap();
+    let dwo_sections = gimli::DwarfSections::load(|id| -> object::Result<Vec<u8>> {
+        let Some(name) = id.dwo_name() else {
+            return Ok(Vec::new());
+        };
+        dwo_file.section_by_name(name).map_or_else(
+            || Ok(Vec::new()),
+            |section| Ok(section.uncompressed_data()?.into_owned()),
+        )
+    })
+    .unwrap();
+    let mut dwo_dwarf = dwo_sections.borrow(|section| gimli::EndianSlice::new(section, endian));
+    dwo_dwarf.make_dwo(&image_dwarf);
+    let split_header = dwo_dwarf.units().next().unwrap().unwrap();
+    let split_unit = dwo_dwarf.unit(split_header).unwrap();
+    let mut entries = split_unit.entries();
+    let mut indexed_addresses = 0;
+    while let Some(entry) = entries.next_dfs().unwrap() {
+        if entry.tag() == gimli::constants::DW_TAG_subprogram
+            && matches!(
+                entry.attr_value(gimli::constants::DW_AT_low_pc),
+                Some(gimli::AttributeValue::DebugAddrIndex(_))
+            )
+        {
+            indexed_addresses += 1;
+        }
+    }
+    assert_eq!(indexed_addresses, SPLIT_FUNCTIONS.len());
+}
+
+fn dwarf_only_options() -> ConversionOptions {
+    ConversionOptions {
+        include_symbols: false,
+        debuginfod_urls: Vec::new(),
+        ..ConversionOptions::default()
+    }
+}
+
+fn assert_function_addresses(
+    report: &gsym::convert::ConversionReport,
+    image: &std::path::Path,
+    names: &[&[u8]],
+) {
+    let bytes = std::fs::read(image).unwrap();
+    let file = object::File::parse(&*bytes).unwrap();
+    for name in names {
+        let symbol = file.symbol_by_name_bytes(name).unwrap();
+        assert!(symbol.is_definition());
+        let expected = symbol.address();
+        let actual = find_function(report, name).map(|function| function.range.start);
+        assert_eq!(actual, Some(expected), "{}", String::from_utf8_lossy(name));
+    }
 }
 
 fn compile_split_dwarf_image(directory: &std::path::Path) -> std::path::PathBuf {
@@ -49,11 +208,12 @@ fn compile_split_dwarf_image(directory: &std::path::Path) -> std::path::PathBuf 
     let image = directory.join("split");
     std::fs::write(
         &source,
-        "static inline __attribute__((always_inline)) int split_inline(int x) { return x + 3; }\n__attribute__((noinline)) int split_target(int x) { return split_inline(x); }\nint main(void) { return split_target(1); }\n",
+        "__attribute__((noinline)) int split_a(int x) { return x + 1; }\n__attribute__((noinline)) int split_b(int x) { return x + 2; }\n__attribute__((noinline)) int split_c(int x) { return x + 3; }\nint main(void) { return split_a(1) + split_b(2) + split_c(3); }\n",
     )
     .unwrap();
     run(Command::new("cc").current_dir(directory).args([
         "-g",
+        "-gdwarf-5",
         "-O2",
         "-gsplit-dwarf",
         "-o",
@@ -368,7 +528,7 @@ fn imports_multi_unit_dwarf4_and_dwarf5_packages() {
             std::fs::rename(&dwo, dwo.with_extension("dwo.unavailable")).unwrap();
         }
 
-        let report = ElfConverter::new(ConversionOptions::default())
+        let report = ElfConverter::new(dwarf_only_options())
             .convert_path(&image)
             .unwrap();
         let first = report
@@ -389,6 +549,11 @@ fn imports_multi_unit_dwarf4_and_dwarf5_packages() {
             report.warnings
         );
         assert!(!second.lines.is_empty());
+        assert_function_addresses(
+            &report,
+            &image,
+            &[b"packaged_first", b"packaged_second", b"main"],
+        );
         let [inline] = first.inline.as_ref().unwrap().children.as_slice() else {
             panic!("expected one packaged inline child for {dwarf_version}");
         };
@@ -456,6 +621,63 @@ fn malformed_dwp_indexes_fail_with_a_bounded_error() {
     let error = convert(ElfInputs::new(&image_bytes).with_dwp(&dwp_bytes))
         .expect_err("a truncated DWP index must be rejected");
     assert!(matches!(error, Error::Dwarf { .. }));
+}
+
+#[test]
+fn dwp_index_cannot_pair_a_skeleton_with_the_wrong_split_unit() {
+    let directory = tempfile::tempdir().unwrap();
+    let (image, dwo_files) = compile_split_units(directory.path(), "-gdwarf-5");
+    let dwp = image.with_extension("dwp");
+    package_dwo_files(&dwo_files, &dwp);
+    let index = directory.path().join("cu-index.bin");
+    let dwp_bytes = std::fs::read(&dwp).unwrap();
+    let dwp_file = object::File::parse(&*dwp_bytes).unwrap();
+    let endian = dwp_file.endianness();
+    let mut index_bytes = dwp_file
+        .section_by_name(".debug_cu_index")
+        .unwrap()
+        .uncompressed_data()
+        .unwrap()
+        .into_owned();
+    swap_first_two_dwp_index_rows(&mut index_bytes, endian);
+    std::fs::write(&index, index_bytes).unwrap();
+    let mismatched = directory.path().join("mismatched.dwp");
+    run(Command::new("objcopy")
+        .arg(format!(
+            "--update-section=.debug_cu_index={}",
+            index.display()
+        ))
+        .arg(&dwp)
+        .arg(&mismatched));
+
+    let image_bytes = std::fs::read(image).unwrap();
+    let dwp_bytes = std::fs::read(mismatched).unwrap();
+    let error = convert(ElfInputs::new(&image_bytes).with_dwp(&dwp_bytes))
+        .expect_err("a DWP index must not redirect a skeleton to another split unit");
+    assert!(matches!(
+        error,
+        Error::Malformed {
+            context: "split DWARF unit",
+            detail,
+        } if detail.contains("ID mismatch")
+    ));
+}
+
+fn swap_first_two_dwp_index_rows(index: &mut [u8], endian: object::Endianness) {
+    let slot_count = endian.read_u32(index[12..16].try_into().unwrap()) as usize;
+    let rows_start = 16 + slot_count * 8;
+    let mut occupied = (0..slot_count).filter(|slot| {
+        let start = 16 + slot * 8;
+        endian.read_u64(index[start..start + 8].try_into().unwrap()) != 0
+    });
+    let first = occupied.next().expect("first occupied DWP index slot");
+    let second = occupied.next().expect("second occupied DWP index slot");
+    let first = rows_start + first * 4;
+    let second = rows_start + second * 4;
+    let first_row: [u8; 4] = index[first..first + 4].try_into().unwrap();
+    let second_row: [u8; 4] = index[second..second + 4].try_into().unwrap();
+    index[first..first + 4].copy_from_slice(&second_row);
+    index[second..second + 4].copy_from_slice(&first_row);
 }
 
 #[test]
