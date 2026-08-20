@@ -33,6 +33,8 @@ objects. It supports:
   text bases for x86-64 and `AArch64` `ET_REL` inputs;
 - dead-range filtering, malformed-range diagnostics, and sequence-aware line
   clamping and declaration-location fallback;
+- LLVM-compatible absolute source paths, including DWARF 2-4 compilation
+  directories and DWARF 5 directory-index-zero handling;
 - `DW_AT_LLVM_stmt_sequence` selection, invalid-offset recovery, and sentinel
   handling;
 - direct-child call sites with neutral DWARF flags;

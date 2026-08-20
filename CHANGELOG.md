@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.7 - 2026-08-20
+
+### Fixed
+
+- Reconstruct absolute DWARF source paths with LLVM-compatible compilation-directory handling for DWARF 2 through 5.
+
+### Changed
+
+- Make command-line-only dependencies optional behind the default `cli` feature so reader-only builds omit them.
+
 ## 0.1.6 - 2026-08-18
 
 ### Added

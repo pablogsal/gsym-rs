@@ -11,8 +11,12 @@ use crate::tools::{required_tool, run};
 fn rust_and_external_gsym_tools_read_each_others_output() {
     let gsymutil = required_tool("llvm-gsymutil");
     let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("interop.c");
-    let image = directory.path().join("interop");
+    let source_dir = directory.path().join("source");
+    let build_dir = directory.path().join("build");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::create_dir_all(&build_dir).unwrap();
+    let source = source_dir.join("interop.c");
+    let image = build_dir.join("interop");
     let rust_gsym = directory.path().join("rust.gsym");
     let external_gsym = directory.path().join("external.gsym");
     std::fs::write(
@@ -20,14 +24,18 @@ fn rust_and_external_gsym_tools_read_each_others_output() {
         "__attribute__((noinline)) int interop_target(int x) { return x + 9; }\nint main(void) { return interop_target(1); }\n",
     )
     .unwrap();
-    run(Command::new("cc").args([
-        "-g",
-        "-O1",
-        "-Wl,--build-id",
-        "-o",
-        image.to_str().unwrap(),
-        source.to_str().unwrap(),
-    ]));
+    run(Command::new(required_tool("clang"))
+        .current_dir(&build_dir)
+        .args([
+            "-g",
+            "-gdwarf-5",
+            "-O1",
+            "-fdebug-compilation-dir=/recorded/build",
+            "-Wl,--build-id",
+            "-o",
+            image.to_str().unwrap(),
+            "../source/interop.c",
+        ]));
 
     let report = ElfConverter::new(ConversionOptions::default())
         .convert_path(&image)
@@ -46,9 +54,14 @@ fn rust_and_external_gsym_tools_read_each_others_output() {
         "--address",
         &format!("{address:#x}"),
     ]));
+    let lookup_stdout = String::from_utf8_lossy(&lookup.stdout);
     assert!(
-        String::from_utf8_lossy(&lookup.stdout).contains("interop_target"),
+        lookup_stdout.contains("interop_target"),
         "external lookup did not return the Rust-written function"
+    );
+    assert!(
+        lookup_stdout.contains("/recorded/build/../source/interop.c"),
+        "external lookup did not preserve the LLVM-compatible absolute source path"
     );
 
     run(Command::new(&gsymutil).args([
@@ -62,5 +75,8 @@ fn rust_and_external_gsym_tools_read_each_others_output() {
     let parsed = Gsym::parse(&external_bytes).unwrap();
     parsed.verify().unwrap();
     let lookup = parsed.lookup(address).unwrap().unwrap();
-    assert_eq!(lookup.frames().last().unwrap().name, b"interop_target");
+    let frame = lookup.frames().last().unwrap();
+    assert_eq!(frame.name, b"interop_target");
+    assert_eq!(frame.directory, b"/recorded/build/../source");
+    assert_eq!(frame.basename, b"interop.c");
 }
