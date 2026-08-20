@@ -4,9 +4,9 @@
 use std::fmt::Write as _;
 use std::process::Command;
 
-use gsym::convert::{
-    ConversionOptions, ConversionWarning, DiscoveryEvent, DiscoveryPolicy, ElfConverter,
-};
+#[cfg(feature = "debuginfod")]
+use gsym::convert::DiscoveryEvent;
+use gsym::convert::{ConversionOptions, ConversionWarning, DiscoveryPolicy, ElfConverter};
 use object::Object;
 
 use crate::elf::retarget_machine;

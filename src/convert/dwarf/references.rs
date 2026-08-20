@@ -342,9 +342,22 @@ pub(super) fn attribute_bytes<R: Reader<Offset = usize>>(
     unit: &Unit<R>,
     value: AttributeValue<R>,
 ) -> Result<Vec<u8>> {
-    if matches!(value, AttributeValue::DebugStrRefSup(_)) && dwarf.sup().is_none() {
+    let Some(value) = attribute_reader(dwarf, unit, value)? else {
         return Ok(Vec::new());
-    }
-    let value = dwarf.attr_string(unit, value).map_err(gimli_error)?;
+    };
     value.to_slice().map(Cow::into_owned).map_err(gimli_error)
+}
+
+pub(super) fn attribute_reader<R: Reader<Offset = usize>>(
+    dwarf: &gimli::Dwarf<R>,
+    unit: &Unit<R>,
+    value: AttributeValue<R>,
+) -> Result<Option<R>> {
+    if matches!(value, AttributeValue::DebugStrRefSup(_)) && dwarf.sup().is_none() {
+        return Ok(None);
+    }
+    dwarf
+        .attr_string(unit, value)
+        .map(Some)
+        .map_err(gimli_error)
 }

@@ -124,6 +124,7 @@ the load bias from runtime addresses in PIE executables and shared libraries.
 | `mmap` | Yes | Memory-mapped GSYM files |
 | `convert` | Yes | Linux ELF and DWARF conversion |
 | `debuginfod` | Yes | Remote separate-debug discovery |
+| `cli` | Yes | `gsymtool` and its command-line dependencies |
 
 Reader and writer only:
 

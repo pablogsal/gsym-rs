@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use gimli::{AttributeValue, DebugLineOffset, DwarfFileType, Format, Reader, Section};
 
-use super::references::attribute_bytes;
+use super::references::attribute_reader;
 use super::{DW_AT_LLVM_STMT_SEQUENCE, gimli_error};
 use crate::convert::ConversionWarning;
 use crate::model::{AddressRange, FileEntry, FileIndex, LineEntry};
@@ -374,18 +375,146 @@ fn intern_file<R: Reader<Offset = usize>>(
     file: &gimli::FileEntry<R>,
     builder: &mut GsymBuilder,
 ) -> Result<Option<FileIndex>> {
-    let basename = attribute_bytes(dwarf, unit, file.path_name())?;
+    let Some(filename_reader) = attribute_reader(dwarf, unit, file.path_name())? else {
+        return Ok(None);
+    };
+    let filename = filename_reader.to_slice().map_err(gimli_error)?;
+    if filename.is_empty() {
+        return Ok(None);
+    }
+    let (filename_directory, basename) = split_path(&filename);
     if basename.is_empty() {
         return Ok(None);
     }
-    let directory = match file.directory(header) {
-        Some(value) => attribute_bytes(dwarf, unit, value)?,
-        None => Vec::new(),
+
+    let directory = if is_absolute_path(&filename) {
+        filename_directory.to_vec()
+    } else {
+        // LLVM's AbsoluteFilePath mode prepends the compilation directory for
+        // DWARF 2-4 and for nonzero DWARF 5 directory indexes. DWARF 5 index
+        // zero already names the compilation directory.
+        let implicit_comp_dir = header.version() < 5 && file.directory_index() == 0;
+        let directory_reader = match file.directory(header) {
+            Some(value) if !implicit_comp_dir => attribute_reader(dwarf, unit, value)?,
+            _ => None,
+        };
+        let directory = match &directory_reader {
+            Some(value) => value.to_slice().map_err(gimli_error)?,
+            None => Cow::<[u8]>::Borrowed(&[]),
+        };
+        let needs_comp_dir = header.version() < 5 || file.directory_index() != 0;
+        let comp_dir = if needs_comp_dir && !is_absolute_path(&directory) {
+            unit.comp_dir
+                .as_ref()
+                .map(Reader::to_slice)
+                .transpose()
+                .map_err(gimli_error)?
+        } else {
+            None
+        };
+        let capacity = directory
+            .len()
+            .saturating_add(comp_dir.as_ref().map_or(0, |path| path.len()))
+            .saturating_add(filename_directory.len())
+            .saturating_add(2);
+        let mut path = if capacity == 2 {
+            Vec::new()
+        } else {
+            Vec::with_capacity(capacity)
+        };
+        if let Some(comp_dir) = comp_dir {
+            append_path(&mut path, &comp_dir);
+        }
+        append_path(&mut path, &directory);
+        append_path(&mut path, filename_directory);
+        path
     };
     builder
-        .add_file(FileEntry {
-            directory,
-            basename,
-        })
+        .add_file(FileEntry::new(directory, basename))
         .map(Some)
+}
+
+fn is_absolute_path(path: &[u8]) -> bool {
+    if path.starts_with(b"/") {
+        return true;
+    }
+    let windows_drive = match path {
+        [_, b':', separator, ..] => matches!(separator, b'/' | b'\\'),
+        _ => false,
+    };
+    if windows_drive {
+        return true;
+    }
+    match path {
+        [first, second, third, rest @ ..] => {
+            matches!(first, b'/' | b'\\')
+                && first == second
+                && !matches!(third, b'/' | b'\\')
+                && rest.iter().any(|byte| matches!(byte, b'/' | b'\\'))
+        }
+        _ => false,
+    }
+}
+
+fn append_path(path: &mut Vec<u8>, component: &[u8]) {
+    if component.is_empty() {
+        return;
+    }
+    if !path.is_empty() && !path.ends_with(b"/") && !component.starts_with(b"/") {
+        path.push(b'/');
+    }
+    path.extend_from_slice(component);
+}
+
+fn split_path(path: &[u8]) -> (&[u8], &[u8]) {
+    let Some(separator) = path.iter().rposition(|byte| *byte == b'/') else {
+        return (&[], path);
+    };
+    let (directory, basename) = path.split_at(separator.saturating_add(1));
+    let directory = if separator == 0 {
+        directory
+    } else {
+        directory.strip_suffix(b"/").unwrap_or(directory)
+    };
+    (directory, basename)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_path, is_absolute_path, split_path};
+
+    #[test]
+    fn recognizes_llvm_absolute_paths_from_posix_and_windows() {
+        for path in [
+            b"/src/main.c".as_slice(),
+            br"C:\src\main.c".as_slice(),
+            br"\\server\share\main.c".as_slice(),
+        ] {
+            assert!(is_absolute_path(path), "{}", String::from_utf8_lossy(path));
+        }
+        for path in [
+            b"src/main.c".as_slice(),
+            br"C:src\main.c".as_slice(),
+            br"\src\main.c".as_slice(),
+            br"\\server".as_slice(),
+        ] {
+            assert!(!is_absolute_path(path), "{}", String::from_utf8_lossy(path));
+        }
+    }
+
+    #[test]
+    fn joins_and_splits_native_posix_paths_without_normalizing() {
+        let mut path = Vec::new();
+        append_path(&mut path, b"/recorded/build");
+        append_path(&mut path, b"../src");
+        append_path(&mut path, b"main.c");
+        assert_eq!(
+            split_path(&path),
+            (b"/recorded/build/../src".as_slice(), b"main.c".as_slice())
+        );
+        assert_eq!(
+            split_path(b"/main.c"),
+            (b"/".as_slice(), b"main.c".as_slice())
+        );
+    }
 }

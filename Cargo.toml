@@ -1,6 +1,6 @@
 [package]
 name = "gsym-rs"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 rust-version = "1.88"
 description = "Pure-Rust reader, writer, and Linux ELF/DWARF converter for LLVM GSYM"
@@ -23,28 +23,38 @@ path = "src/lib.rs"
 [[bin]]
 name = "gsymtool"
 path = "gsymtool/src/main.rs"
-required-features = ["convert"]
+required-features = ["cli"]
 
 [[test]]
 name = "cli"
 path = "gsymtool/tests/cli/main.rs"
-required-features = ["convert"]
+required-features = ["cli"]
 
 [workspace]
 resolver = "3"
 
 [features]
-default = ["mmap", "convert", "debuginfod"]
+default = ["mmap", "convert", "debuginfod", "cli"]
 mmap = ["dep:memmap2"]
 convert = ["dep:crc32fast", "dep:gimli", "dep:lzma-rs", "dep:object"]
 debuginfod = ["convert", "dep:debuginfod-client"]
+cli = [
+    "convert",
+    "dep:anstream",
+    "dep:anstyle",
+    "dep:anyhow",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:mimalloc",
+    "dep:tempfile",
+]
 
 [dependencies]
-anstream = "1.0"
-anstyle = "1.0"
-anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
-clap_complete = "4.5"
+anstream = { version = "1.0", optional = true }
+anstyle = { version = "1.0", optional = true }
+anyhow = { version = "1.0", optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
+clap_complete = { version = "4.5", optional = true }
 crc32fast = { version = "1.5", optional = true }
 gimli = { version = "0.34", optional = true, default-features = false, features = ["read", "std"] }
 hashbrown = { version = "0.17", default-features = false, features = ["inline-more"] }
@@ -53,13 +63,13 @@ memmap2 = { version = "0.9.8", optional = true }
 lzma-rs = { version = "0.3", optional = true }
 object = { version = "0.40", optional = true, default-features = false, features = ["read", "compression", "elf", "std"] }
 smallvec = "1.15"
-tempfile = "3.20"
+tempfile = { version = "3.20", optional = true }
 thiserror = "2.0"
 zerocopy = "0.8.56"
 debuginfod-client = { package = "debuginfod", version = "0.3", optional = true, default-features = false, features = ["reqwest"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-mimalloc = "0.1.52"
+mimalloc = { version = "0.1.52", optional = true }
 
 [dev-dependencies]
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1", features = ["html_reports"] }

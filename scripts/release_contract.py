@@ -158,7 +158,7 @@ def validate_structure() -> str:
         {
             "name": "gsymtool",
             "path": "gsymtool/src/main.rs",
-            "required-features": ["convert"],
+            "required-features": ["cli"],
         }
     ]:
         fail("the published package must contain the gsymtool binary")

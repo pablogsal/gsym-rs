@@ -211,6 +211,61 @@ fn recursive_type_graphs_do_not_affect_function_conversion() {
 }
 
 #[test]
+fn resolves_line_files_like_llvm_absolute_paths_for_dwarf2_through_dwarf5() {
+    for dwarf_version in ["-gdwarf-2", "-gdwarf-3", "-gdwarf-4", "-gdwarf-5"] {
+        let directory = tempfile::tempdir().unwrap();
+        let source_dir = directory.path().join("src");
+        let build_dir = directory.path().join("build");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&build_dir).unwrap();
+        std::fs::write(
+            source_dir.join("relative.h"),
+            "__attribute__((noinline)) static int from_header(int x) { return x + 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            build_dir.join("main.c"),
+            "#include \"../src/relative.h\"\nint main(void) { return from_header(1); }\n",
+        )
+        .unwrap();
+        let image = build_dir.join("paths");
+        run(Command::new(required_tool("clang"))
+            .current_dir(&build_dir)
+            .args([
+                "-g",
+                dwarf_version,
+                "-O0",
+                "-fdebug-compilation-dir=/recorded/build",
+                "main.c",
+                "-o",
+                image.to_str().unwrap(),
+            ]));
+
+        let report = ElfConverter::new(ConversionOptions::default())
+            .convert_path(&image)
+            .unwrap();
+        let files = report
+            .builder
+            .files()
+            .iter()
+            .filter(|file| matches!(file.basename.as_slice(), b"main.c" | b"relative.h"))
+            .map(|file| (file.directory.as_slice(), file.basename.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            files,
+            [
+                (b"/recorded/build".as_slice(), b"main.c".as_slice()),
+                (
+                    b"/recorded/build/./../src".as_slice(),
+                    b"relative.h".as_slice(),
+                ),
+            ],
+            "{dwarf_version}"
+        );
+    }
+}
+
+#[test]
 fn falls_back_to_declaration_location_for_dwarf4_and_dwarf5() {
     for dwarf_version in ["-gdwarf-4", "-gdwarf-5"] {
         let directory = tempfile::tempdir().unwrap();
