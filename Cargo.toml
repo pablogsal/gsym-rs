@@ -32,6 +32,7 @@ required-features = ["cli"]
 
 [workspace]
 resolver = "3"
+members = ["gsym-cache"]
 
 [features]
 default = ["mmap", "convert", "debuginfod", "cli"]

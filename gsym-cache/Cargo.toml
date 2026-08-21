@@ -1,0 +1,47 @@
+[package]
+name = "gsym-cache"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A small, concurrent Linux filesystem cache for immutable GSYM files"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pablogsal/gsym-rs"
+readme = "README.md"
+keywords = ["gsym", "cache", "symbolication", "debugging"]
+categories = ["caching", "development-tools::debugging"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+
+[features]
+default = ["lookup"]
+lookup = ["dep:rustix"]
+access = ["lookup"]
+manage = ["access", "dep:gsym", "dep:tempfile"]
+
+[dependencies]
+gsym = { package = "gsym-rs", path = "..", version = "0.1.7", optional = true, default-features = false, features = ["mmap"] }
+tempfile = { version = "3.20", optional = true }
+thiserror = "2.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", optional = true, default-features = false, features = ["fs", "process", "std"] }
+
+[dev-dependencies]
+tempfile = "3.20"
+
+[[example]]
+name = "lookup"
+required-features = ["lookup"]
+
+[[example]]
+name = "populate"
+required-features = ["manage"]
+
+[[example]]
+name = "maintain"
+required-features = ["manage"]
+
+[lints]
+workspace = true
