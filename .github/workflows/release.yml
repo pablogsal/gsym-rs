@@ -14,6 +14,7 @@ on:
       - Cargo.toml
       - fuzz/Cargo.lock
       - fuzz/Cargo.toml
+      - gsym-cache/**
       - LICENSE-APACHE
       - LICENSE-MIT
       - RELEASE.md
@@ -29,7 +30,7 @@ on:
         default: dry-run
         type: string
       publish-crate:
-        description: "Publish with trusted publishing (disable only after a manual bootstrap publish)"
+        description: "Publish gsym-rs with trusted publishing"
         required: false
         default: true
         type: boolean
@@ -305,7 +306,7 @@ jobs:
           retention-days: 14
 
   publish-crates-io:
-    name: Publish to crates.io
+    name: Publish gsym-rs to crates.io
     needs: [plan, assemble]
     if: ${{ needs.plan.outputs.tag != 'dry-run' && inputs.publish-crate }}
     runs-on: ubuntu-24.04

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 - 2026-08-21
+
+### Added
+
+- Add the Linux-only `gsym-cache` crate for build-ID-addressed GSYM lookup, access tracking, process-safe population, negative caching, pruning, and recovery.
+
+### Performance
+
+- Keep cache hits, misses, and debounced access tracking allocation-free after directory setup.
+- Bound pruning memory and avoid per-entry build-ID allocation for common SHA-1 and SHA-256 identifiers.
+
+### Security
+
+- Pin trusted cache directories, reject unsafe ownership and permissions, and prevent symlink traversal during object lookup.
+- Verify complete GSYM structure and the embedded build ID before atomically publishing generated files.
+
 ## 0.1.7 - 2026-08-20
 
 ### Fixed

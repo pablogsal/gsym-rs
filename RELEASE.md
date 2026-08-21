@@ -31,9 +31,18 @@ from GitHub Actions; do not create or push the tag manually.
    cargo clippy --manifest-path fuzz/Cargo.toml --bins --locked -- -D warnings
    cargo test --workspace --all-features --locked
    cargo publish --package gsym-rs --dry-run --locked
+   cargo publish --package gsym-cache --dry-run --locked
    ```
 
 4. Open and merge a pull request. Wait for every required check on `main`.
+5. If this release changes `gsym-cache`, publish that package from the merged
+   commit and wait for crates.io to serve it. A new crate must be bootstrapped
+   with a crates.io API token before trusted publishing can be configured:
+
+   ```bash
+   cargo publish --package gsym-cache --locked
+   cargo info gsym-cache
+   ```
 
 ## Rehearse
 
@@ -56,10 +65,11 @@ python3 scripts/release_common.py --plan X.Y.Z
 2. Enter `vX.Y.Z` exactly and leave crate publishing enabled.
 3. Approve the `release` environment when prompted.
 
-The workflow publishes the crate only after every archive and the SBOM have
-passed validation. It then revalidates the payload, signs build-provenance and
-CycloneDX SBOM attestations for every archive, and creates the immutable GitHub
-release and tag from the dispatched commit.
+The workflow first requires the workspace's `gsym-cache` version to be live.
+It publishes `gsym-rs` only after every archive and the SBOM have passed
+validation, then revalidates the payload, signs build-provenance and CycloneDX
+SBOM attestations for every archive, and creates the immutable GitHub release
+and tag from the dispatched commit.
 
 ## Verify
 
@@ -75,11 +85,13 @@ gh attestation verify --repo pablogsal/gsym-rs \
   --predicate-type https://cyclonedx.org/bom \
   gsymtool-X.Y.Z-<target>.tar.gz
 cargo info gsym-rs
+cargo info gsym-cache
 ```
 
 Confirm that `isImmutable` is `true`, the tag points at the intended commit on
 `main`, the published asset names match the release plan, both attestations
 verify, and crates.io serves `X.Y.Z`.
+Verify that crates.io also serves the `gsym-cache` version in its manifest.
 
 ## Recover from failure
 

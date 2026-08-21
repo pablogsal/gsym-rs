@@ -21,7 +21,7 @@ access = ["lookup"]
 manage = ["access", "dep:gsym", "dep:tempfile"]
 
 [dependencies]
-gsym = { package = "gsym-rs", path = "..", version = "0.1.7", optional = true, default-features = false, features = ["mmap"] }
+gsym = { package = "gsym-rs", path = "..", version = ">=0.1.7, <0.3", optional = true, default-features = false, features = ["mmap"] }
 tempfile = { version = "3.20", optional = true }
 thiserror = "2.0"
 
