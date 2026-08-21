@@ -43,8 +43,7 @@ main {
   grid-template-columns: minmax(180px, 300px) minmax(0, 1fr);
   gap: clamp(32px, 7vw, 88px);
   align-items: center;
-  min-height: 62vh;
-  padding: 72px 0 56px;
+  padding: clamp(48px, 7vw, 72px) 0 clamp(40px, 6vw, 56px);
 }
 
 .mascot {
@@ -136,7 +135,7 @@ footer a:focus-visible {
 }
 
 .docs {
-  padding: 64px 0 80px;
+  padding: clamp(40px, 5vw, 56px) 0 80px;
   border-top: 1px solid #3b332e;
 }
 
@@ -221,12 +220,16 @@ footer {
 
   .hero {
     grid-template-columns: 1fr;
-    min-height: auto;
-    padding-top: 42px;
+    gap: 28px;
+    padding: 36px 0 40px;
   }
 
   .mascot {
-    width: min(210px, 65vw);
+    width: min(190px, 58vw);
+  }
+
+  .docs {
+    padding-top: 36px;
   }
 
   h1 {
