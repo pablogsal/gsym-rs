@@ -38,7 +38,9 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc --workspace --all-features --no-deps --locked
-          printf '<meta http-equiv="refresh" content="0; url=gsym/index.html">\n' > target/doc/index.html
+          install -m 0644 .github/pages/index.html target/doc/index.html
+          install -m 0644 .github/pages/style.css target/doc/gsym-pages.css
+          install -m 0644 assets/mascot-compact.png target/doc/mascot-compact.png
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:

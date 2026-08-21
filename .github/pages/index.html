@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Documentation for gsym-rs and gsym-cache.">
+    <meta name="theme-color" content="#171412">
+    <title>gsym-rs documentation</title>
+    <link rel="stylesheet" href="gsym-pages.css">
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <img
+          class="mascot"
+          src="mascot-compact.png"
+          alt="The gsym-rs detective crab mascot"
+          width="1536"
+          height="1024"
+        >
+        <div>
+          <p class="eyebrow">LLVM GSYM tooling for Rust</p>
+          <h1>Read, build, and cache GSYM files.</h1>
+          <p class="intro">
+            Pure-Rust GSYM support, Linux ELF/DWARF conversion, and a
+            profiler-friendly cache for generated symbol files.
+          </p>
+          <nav aria-label="Project links">
+            <a class="button primary" href="https://github.com/pablogsal/gsym-rs">GitHub</a>
+            <a class="button" href="https://github.com/pablogsal/gsym-rs/releases/latest">Latest release</a>
+          </nav>
+        </div>
+      </header>
+
+      <section class="docs" aria-labelledby="documentation">
+        <div class="section-heading">
+          <p class="eyebrow">API reference</p>
+          <h2 id="documentation">Choose a crate</h2>
+        </div>
+
+        <div class="cards">
+          <article class="card">
+            <div>
+              <p class="crate-name">gsym-rs</p>
+              <h3>GSYM reader, writer, and converter</h3>
+              <p>
+                Parse and query LLVM-compatible GSYM files, build new files,
+                or convert Linux ELF and DWARF data with <code>gsymtool</code>.
+              </p>
+            </div>
+            <ul aria-label="gsym-rs capabilities">
+              <li>GSYM v1 and v2</li>
+              <li>Little- and big-endian data</li>
+              <li>DWARF 2–5 and split debug information</li>
+            </ul>
+            <div class="card-links">
+              <a class="button primary" href="gsym/index.html">Open API docs</a>
+              <a class="text-link" href="https://crates.io/crates/gsym-rs">crates.io</a>
+            </div>
+          </article>
+
+          <article class="card">
+            <div>
+              <p class="crate-name">gsym-cache</p>
+              <h3>Concurrent build-ID cache</h3>
+              <p>
+                Store immutable GSYM files in a Linux cache with allocation-free
+                steady-state lookup and optional population and maintenance.
+              </p>
+            </div>
+            <ul aria-label="gsym-cache capabilities">
+              <li>Lock-free profiler-facing reads</li>
+              <li>Verified atomic publication</li>
+              <li>Bounded pruning and recovery</li>
+            </ul>
+            <div class="card-links">
+              <a class="button primary" href="gsym_cache/index.html">Open API docs</a>
+              <a class="text-link" href="https://crates.io/crates/gsym-cache">crates.io</a>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <footer>
+        <span>MIT or Apache-2.0</span>
+        <a href="https://github.com/pablogsal/gsym-rs/blob/main/README.md">Guide and examples</a>
+        <a href="https://llvm.org/docs/GSYM.html">About GSYM</a>
+      </footer>
+    </main>
+  </body>
+</html>
