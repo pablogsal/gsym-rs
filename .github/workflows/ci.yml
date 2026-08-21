@@ -204,6 +204,9 @@ jobs:
       - name: Check every combination of the library features
         run: cargo hack check --package gsym-rs --feature-powerset --locked
 
+      - name: Check every combination of the cache features
+        run: cargo hack check --package gsym-cache --feature-powerset --locked
+
   package:
     name: Distribution / crates.io package
     needs: tests
@@ -233,12 +236,17 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: List the packaged files
-        run: cargo package --package gsym-rs --list --locked
+        run: |
+          cargo package --package gsym-rs --list --locked
+          cargo package --package gsym-cache --list --locked
 
       # This also compiles the crate from the packaged tarball, which is what
       # catches a file that the documentation includes but packaging drops.
       - name: Verify the package builds as published
         run: cargo publish --package gsym-rs --dry-run --locked
+
+      - name: Verify the cache package builds as published
+        run: cargo publish --package gsym-cache --dry-run --locked
 
       - name: Validate the release contracts
         run: python3 scripts/release_contract.py --tag dry-run
