@@ -81,6 +81,12 @@ gsymtool convert ./app -o ./app.gsym --dwp ./app.dwp
 gsymtool convert ./bin --output-dir ./gsym --recursive --jobs 8
 ```
 
+## Cache generated files
+
+The workspace also contains [`gsym-cache`](gsym-cache/), a Linux-only,
+build-ID-addressed cache with a lock-free read path and optional process-safe
+population and pruning support.
+
 ## Query and inspect
 
 ```console

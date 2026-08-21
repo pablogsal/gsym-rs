@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_common import CRATE, make_fail  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
+CACHE_CRATE = "gsym-cache"
+CACHE_MANIFEST = ROOT / CACHE_CRATE / "Cargo.toml"
 RELEASE_TAG = re.compile(
     r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$"
 )
@@ -124,10 +126,10 @@ def github_resource_exists(path: str) -> bool:
     )
 
 
-def crates_io_version_exists(version: str) -> bool:
+def crates_io_version_exists(crate_name: str, version: str) -> bool:
     return resource_exists(
         urllib.request.Request(
-            f"https://crates.io/api/v1/crates/{CRATE}/{urllib.parse.quote(version)}",
+            f"https://crates.io/api/v1/crates/{crate_name}/{urllib.parse.quote(version)}",
             headers={"Accept": "application/json", "User-Agent": USER_AGENT},
         ),
         "crates.io",
@@ -184,7 +186,15 @@ def validate_structure() -> str:
     if sections[0] != version:
         fail(f"the newest CHANGELOG.md section is {sections[0]}, not {version}")
 
+    cache_package = load_toml(CACHE_MANIFEST)["package"]
+    if cache_package["name"] != CACHE_CRATE or not cache_package.get("version"):
+        fail(f"{CACHE_MANIFEST.relative_to(ROOT)} must describe {CACHE_CRATE}")
+
     return version
+
+
+def cache_version() -> str:
+    return load_toml(CACHE_MANIFEST)["package"]["version"]
 
 
 def release_notes(version: str) -> str:
@@ -222,10 +232,15 @@ def validate_release(
     # The crate reaches crates.io before the tag is created, so the two
     # availability checks are separate: the re-validation that guards tagging
     # must not object to the version it has just published itself.
-    if check_crates_io and crates_io_version_exists(version):
+    if check_crates_io and crates_io_version_exists(CRATE, version):
         fail(f"{CRATE} {version} is already published on crates.io")
-    if require_crates_io and not crates_io_version_exists(version):
+    if require_crates_io and not crates_io_version_exists(CRATE, version):
         fail(f"{CRATE} {version} is not published on crates.io")
+    cache_release = cache_version()
+    if not crates_io_version_exists(CACHE_CRATE, cache_release):
+        fail(
+            f"{CACHE_CRATE} {cache_release} must be published before the {CRATE} release"
+        )
 
     if not check_availability:
         return
@@ -256,7 +271,7 @@ def wait_for_crates_io(version: str, attempts: int = 6, interval: int = 20) -> N
     """Block until crates.io serves the version this run published."""
 
     for attempt in range(1, attempts + 1):
-        if crates_io_version_exists(version):
+        if crates_io_version_exists(CRATE, version):
             print(f"crates.io serves {CRATE} {version}", file=sys.stderr)
             return
         print(f"attempt {attempt}: crates.io does not serve it yet", file=sys.stderr)

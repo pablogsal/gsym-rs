@@ -1,6 +1,6 @@
 [package]
 name = "gsym-rs"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Pure-Rust reader, writer, and Linux ELF/DWARF converter for LLVM GSYM"
@@ -32,6 +32,7 @@ required-features = ["cli"]
 
 [workspace]
 resolver = "3"
+members = ["gsym-cache"]
 
 [features]
 default = ["mmap", "convert", "debuginfod", "cli"]
