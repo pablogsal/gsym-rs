@@ -14,13 +14,13 @@ const MIX_LOW: u64 = 0xc4ce_b9fe_1a85_ec53;
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut state = bytes.len() as u64;
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let word = <[u8; 8]>::try_from(chunk).map_or(0, u64::from_le_bytes);
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        let word = u64::from_le_bytes(*chunk);
         state = (state.rotate_left(5) ^ word).wrapping_mul(MULTIPLY);
     }
     let mut tail = 0_u64;
-    for byte in chunks.remainder() {
+    for byte in remainder {
         tail = (tail << 8) | u64::from(*byte);
     }
     state = (state.rotate_left(5) ^ tail).wrapping_mul(MULTIPLY);
