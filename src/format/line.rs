@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 
 use crate::endian::{Cursor, Encoder, Endian};
@@ -197,44 +196,42 @@ pub(crate) fn encode_into(lines: &[LineEntry], output: &mut Encoder, base: u64) 
 fn choose_delta_range(lines: &[LineEntry]) -> (i64, i64) {
     const MAXIMUM_LINE_RANGE: i64 = 14;
 
-    if lines.len() == 1 {
+    if lines.len() < 2 {
         return (0, 0);
     }
 
-    let mut counts = BTreeMap::<i64, u32>::new();
-    for pair in lines.windows(2) {
-        let [previous, current] = pair else { continue };
-        let delta = i64::from(current.line).saturating_sub(i64::from(previous.line));
-        let slot = counts.entry(delta).or_default();
-        *slot = slot.saturating_add(1);
+    let deltas = lines
+        .iter()
+        .zip(lines.iter().skip(1))
+        .map(|(previous, current)| {
+            i64::from(current.line).saturating_sub(i64::from(previous.line))
+        });
+    let (mut minimum, mut maximum) = (i64::MAX, i64::MIN);
+    for delta in deltas.clone() {
+        minimum = minimum.min(delta);
+        maximum = maximum.max(delta);
+        if maximum.saturating_sub(minimum) > MAXIMUM_LINE_RANGE {
+            break;
+        }
     }
-    let deltas: Vec<(i64, u32)> = counts.into_iter().collect();
-    let mut minimum = deltas.first().map_or(0, |entry| entry.0);
-    let mut maximum = deltas.last().map_or(0, |entry| entry.0);
-
     if maximum.saturating_sub(minimum) > MAXIMUM_LINE_RANGE {
-        let mut best: Option<(i64, i64)> = None;
+        let mut deltas: Vec<_> = deltas.collect();
+        deltas.sort_unstable();
         let mut best_count = 0_u32;
-        for (start, &(first, _)) in deltas.iter().enumerate() {
-            let mut count = 0_u32;
-            let mut last = first;
-            for &(delta, hits) in deltas
-                .get(start..)
-                .unwrap_or_default()
-                .iter()
-                .take_while(|(delta, _)| delta.saturating_sub(first) <= MAXIMUM_LINE_RANGE)
+        let mut end = 0;
+        for (start, &first) in deltas.iter().enumerate() {
+            while deltas
+                .get(end)
+                .is_some_and(|delta| delta.saturating_sub(first) <= MAXIMUM_LINE_RANGE)
             {
-                count = count.saturating_add(hits);
-                last = delta;
+                end = end.saturating_add(1);
             }
+            let count = u32::try_from(end.saturating_sub(start)).unwrap_or(u32::MAX);
             if count > best_count {
                 best_count = count;
-                best = Some((first, last));
+                minimum = first;
+                maximum = deltas.get(end.saturating_sub(1)).copied().unwrap_or(first);
             }
-        }
-        if let Some((low, high)) = best {
-            minimum = low;
-            maximum = high;
         }
     }
     if minimum == maximum && minimum > 0 && minimum < MAXIMUM_LINE_RANGE {
