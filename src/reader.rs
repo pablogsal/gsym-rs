@@ -455,7 +455,7 @@ impl<D: AsRef<[u8]>> Gsym<D> {
     pub(crate) fn decode_all_verified(&self) -> Result<(VerifyReport, Vec<crate::Function>)> {
         let mut functions = Vec::with_capacity(self.layout.address_count as usize);
         let report = self.verify_with(|reference, encoded| {
-            functions.push(owned::decode(reference, encoded)?);
+            functions.push(owned::decode_validated(reference, encoded)?);
             Ok(())
         })?;
         Ok((report, functions))

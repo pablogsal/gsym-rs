@@ -105,26 +105,36 @@ fn validate_inline(reference: &FunctionRef<'_>, node: &EncodedInlineNode) -> Res
 }
 
 pub(super) fn decode(reference: &FunctionRef<'_>, encoded: EncodedFunction) -> Result<Function> {
-    decode_at(reference, encoded, None, 0)
+    decode_at::<true>(reference, encoded, None, 0)
 }
 
-fn decode_at(
+// verify_with has already checked this record, including all nested records.
+pub(super) fn decode_validated(
+    reference: &FunctionRef<'_>,
+    encoded: EncodedFunction,
+) -> Result<Function> {
+    decode_at::<false>(reference, encoded, None, 0)
+}
+
+fn decode_at<const VALIDATE: bool>(
     reference: &FunctionRef<'_>,
     encoded: EncodedFunction,
     merged_parent: Option<crate::AddressRange>,
     depth: usize,
 ) -> Result<Function> {
-    check_merged_depth(depth)?;
-    validate_semantics(&encoded, merged_parent)?;
-    for line in encoded.lines.iter().flatten() {
-        let _ = reference.file(line.file)?;
+    if VALIDATE {
+        check_merged_depth(depth)?;
+        validate_semantics(&encoded, merged_parent)?;
+        for line in encoded.lines.iter().flatten() {
+            let _ = reference.file(line.file)?;
+        }
     }
     let range = encoded.range;
     let resolve = |offset| reference.string(offset).map(<[u8]>::to_vec);
     let merged = encoded
         .merged
         .into_iter()
-        .map(|item| decode_at(reference, item, Some(range), depth.saturating_add(1)))
+        .map(|item| decode_at::<VALIDATE>(reference, item, Some(range), depth.saturating_add(1)))
         .collect::<Result<_>>()?;
     let call_sites = encoded
         .call_sites
@@ -147,15 +157,20 @@ fn decode_at(
         lines: encoded.lines.unwrap_or_default(),
         inline: encoded
             .inline
-            .map(|node| decode_inline(reference, node))
+            .map(|node| decode_inline::<VALIDATE>(reference, node))
             .transpose()?,
         merged,
         call_sites,
     })
 }
 
-fn decode_inline(reference: &FunctionRef<'_>, node: EncodedInlineNode) -> Result<InlineNode> {
-    let _ = reference.file(node.call_file.into())?;
+fn decode_inline<const VALIDATE: bool>(
+    reference: &FunctionRef<'_>,
+    node: EncodedInlineNode,
+) -> Result<InlineNode> {
+    if VALIDATE {
+        let _ = reference.file(node.call_file.into())?;
+    }
     Ok(InlineNode {
         ranges: node.ranges,
         name: if node.name == 0 {
@@ -168,7 +183,7 @@ fn decode_inline(reference: &FunctionRef<'_>, node: EncodedInlineNode) -> Result
         children: node
             .children
             .into_iter()
-            .map(|child| decode_inline(reference, child))
+            .map(|child| decode_inline::<VALIDATE>(reference, child))
             .collect::<Result<_>>()?,
     })
 }
