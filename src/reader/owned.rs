@@ -4,8 +4,12 @@ use crate::model::{CallSite, Function, InlineNode};
 
 use super::function::FunctionRef;
 
-pub(super) fn validate(reference: &FunctionRef<'_>, function: &EncodedFunction) -> Result<()> {
-    validate_at(reference, function, None, 0)
+pub(super) fn validate(
+    reference: &FunctionRef<'_>,
+    function: &EncodedFunction,
+    verified_files: &mut [bool],
+) -> Result<()> {
+    validate_at(reference, function, None, 0, verified_files)
 }
 
 fn validate_at(
@@ -13,15 +17,16 @@ fn validate_at(
     function: &EncodedFunction,
     merged_parent: Option<crate::AddressRange>,
     depth: usize,
+    verified_files: &mut [bool],
 ) -> Result<()> {
     check_merged_depth(depth)?;
     validate_semantics(function, merged_parent)?;
     let _ = reference.string(function.name)?;
     for line in function.lines.iter().flatten() {
-        let _ = reference.file(line.file)?;
+        verify_file(reference, line.file, verified_files)?;
     }
     if let Some(node) = &function.inline {
-        validate_inline(reference, node)?;
+        validate_inline(reference, node, verified_files)?;
     }
     for site in &function.call_sites {
         for offset in &site.match_regex {
@@ -34,6 +39,7 @@ fn validate_at(
             merged,
             Some(function.range),
             depth.saturating_add(1),
+            verified_files,
         )?;
     }
     Ok(())
@@ -93,13 +99,33 @@ fn validate_inline_ranges(node: &EncodedInlineNode, parents: &[crate::AddressRan
     Ok(())
 }
 
-fn validate_inline(reference: &FunctionRef<'_>, node: &EncodedInlineNode) -> Result<()> {
+fn validate_inline(
+    reference: &FunctionRef<'_>,
+    node: &EncodedInlineNode,
+    verified_files: &mut [bool],
+) -> Result<()> {
     if node.name != 0 {
         let _ = reference.string(node.name)?;
     }
-    let _ = reference.file(node.call_file.into())?;
+    verify_file(reference, node.call_file.into(), verified_files)?;
     for child in &node.children {
-        validate_inline(reference, child)?;
+        validate_inline(reference, child, verified_files)?;
+    }
+    Ok(())
+}
+
+fn verify_file(
+    reference: &FunctionRef<'_>,
+    index: crate::FileIndex,
+    verified: &mut [bool],
+) -> Result<()> {
+    let slot = verified.get_mut(index.get() as usize);
+    if slot.as_ref().is_some_and(|valid| **valid) {
+        return Ok(());
+    }
+    let _ = reference.file(index)?;
+    if let Some(slot) = slot {
+        *slot = true;
     }
     Ok(())
 }

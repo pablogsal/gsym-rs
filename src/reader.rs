@@ -482,6 +482,10 @@ impl<D: AsRef<[u8]>> Gsym<D> {
                 return Err(Error::InvalidFormat("file-table index zero must be empty"));
             }
         }
+        let mut verified_files = vec![false; self.layout.file_count as usize];
+        if let Some(first) = verified_files.first_mut() {
+            *first = true;
+        }
         let mut previous = None;
         for index in 0..self.layout.address_count as usize {
             let address = self.address(index)?;
@@ -491,11 +495,13 @@ impl<D: AsRef<[u8]>> Gsym<D> {
             previous = Some(address);
             let function = self.function(index)?;
             let decoded = function.decode_encoded()?;
-            owned::validate(&function, &decoded)?;
+            owned::validate(&function, &decoded, &mut verified_files)?;
             visitor(&function, decoded)?;
         }
-        for index in 0..self.layout.file_count {
-            let _ = self.file(index)?;
+        for (index, verified) in (0..self.layout.file_count).zip(verified_files) {
+            if !verified {
+                let _ = self.file(index)?;
+            }
         }
         Ok(VerifyReport {
             functions: self.layout.address_count as usize,
