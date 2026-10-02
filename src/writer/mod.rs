@@ -92,10 +92,10 @@ fn encode_builder(builder: GsymBuilder) -> Result<encode::EncodedImage> {
             .saturating_add(files.len().saturating_mul(2)),
     );
     let encoded_files = intern_files(&files, &mut strings);
-    let mut encoded_functions = Vec::with_capacity(functions.len());
-    for function in functions {
-        encoded_functions.push(encode_function(function, &mut strings)?);
-    }
+    let encoded_functions = functions
+        .into_iter()
+        .map(|function| encode_function(function, &mut strings))
+        .collect::<Result<Vec<_>>>()?;
     let image = match options.writer.version {
         GsymVersion::V1 => encode_v1(
             &options.writer,

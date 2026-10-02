@@ -124,22 +124,27 @@ fn encode_function_at(
         .inline
         .map(|inline| encode_inline(inline, strings))
         .transpose()?;
-    let mut merged = Vec::with_capacity(function.merged.len());
-    for entry in function.merged {
-        merged.push(encode_function_at(entry, strings, depth.saturating_add(1))?);
-    }
-    let mut call_sites = Vec::with_capacity(function.call_sites.len());
-    for call_site in function.call_sites {
-        let mut match_regex = Vec::with_capacity(call_site.match_regex.len());
-        for pattern in &call_site.match_regex {
-            match_regex.push(strings.intern(pattern));
-        }
-        call_sites.push(EncodedCallSite {
-            return_offset: call_site.return_offset,
-            flags: call_site.flags.bits(),
-            match_regex,
-        });
-    }
+    let merged = function
+        .merged
+        .into_iter()
+        .map(|entry| encode_function_at(entry, strings, depth.saturating_add(1)))
+        .collect::<Result<Vec<_>>>()?;
+    let call_sites = function
+        .call_sites
+        .into_iter()
+        .map(|call_site| {
+            let match_regex = call_site
+                .match_regex
+                .into_iter()
+                .map(|pattern| strings.intern(&pattern))
+                .collect();
+            EncodedCallSite {
+                return_offset: call_site.return_offset,
+                flags: call_site.flags.bits(),
+                match_regex,
+            }
+        })
+        .collect();
     Ok(EncodedFunction {
         range: function.range,
         name,
@@ -152,10 +157,11 @@ fn encode_function_at(
 
 fn encode_inline(node: InlineNode, strings: &mut StringTable) -> Result<EncodedInlineNode> {
     let name = strings.intern(&node.name);
-    let mut children = Vec::with_capacity(node.children.len());
-    for child in node.children {
-        children.push(encode_inline(child, strings)?);
-    }
+    let children = node
+        .children
+        .into_iter()
+        .map(|child| encode_inline(child, strings))
+        .collect::<Result<Vec<_>>>()?;
     Ok(EncodedInlineNode {
         ranges: node.ranges,
         name,
