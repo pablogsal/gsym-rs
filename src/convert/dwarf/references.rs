@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
+use std::hash::BuildHasher;
 use std::rc::Rc;
 
 use gimli::{AttributeValue, DebuggingInformationEntry, Reader, Unit};
@@ -56,12 +57,23 @@ impl VisitedDies {
     }
 }
 
+const ENTRY_CACHE_CAPACITY: usize = 128;
+
+type EntryKey = (
+    gimli::SectionId,
+    gimli::UnitSectionOffset<usize>,
+    gimli::UnitOffset<usize>,
+);
+type CachedEntry<R> = (EntryKey, Rc<DebuggingInformationEntry<R>>);
+
 type ReferencedUnit<R> = (Rc<Unit<R>>, gimli::UnitOffset<usize>);
 
 /// Reuses a bounded number of referenced units while importing a unit's DIEs.
 pub(super) struct DwarfResolver<'a, R: Reader<Offset = usize>> {
     pub(super) dwarf: &'a gimli::Dwarf<R>,
     units: RefCell<VecDeque<Rc<Unit<R>>>>,
+    entries: RefCell<Vec<Option<CachedEntry<R>>>>,
+    entry_hasher: hashbrown::DefaultHashBuilder,
     supplementary: Option<Box<Self>>,
 }
 
@@ -70,12 +82,57 @@ impl<'a, R: Reader<Offset = usize>> DwarfResolver<'a, R> {
         Self {
             dwarf,
             units: RefCell::new(VecDeque::new()),
+            entries: RefCell::new(Vec::new()),
+            entry_hasher: hashbrown::DefaultHashBuilder::default(),
             supplementary: dwarf.sup().map(|sup| Box::new(Self::new(sup))),
         }
     }
 
     fn sup(&self) -> Option<&Self> {
         self.supplementary.as_deref()
+    }
+
+    fn entry(
+        &self,
+        unit: &Unit<R>,
+        offset: gimli::UnitOffset<usize>,
+    ) -> Result<Rc<DebuggingInformationEntry<R>>> {
+        let mut input = unit.entries_raw(Some(offset)).map_err(gimli_error)?;
+        let key = (unit.header.section(), unit.header.offset(), offset);
+        let index = usize::try_from(
+            self.entry_hasher.hash_one(key) & (ENTRY_CACHE_CAPACITY as u64).saturating_sub(1),
+        )
+        .unwrap_or(0);
+        let mut cached = self.entries.borrow_mut();
+        if let Some((cached_key, entry)) = cached.get(index).and_then(Option::as_ref)
+            && *cached_key == key
+        {
+            return Ok(Rc::clone(entry));
+        }
+        if cached.is_empty() {
+            cached.resize_with(ENTRY_CACHE_CAPACITY, || None);
+        }
+        // Direct mapping bounds both lookup cost and retained entries. Reuse
+        // an evicted entry's buffers unless recursive resolution still owns it.
+        let mut entry = cached
+            .get_mut(index)
+            .and_then(Option::take)
+            .map(|(_, entry)| entry)
+            .unwrap_or_default();
+        if Rc::get_mut(&mut entry).is_none() {
+            entry = Rc::default();
+        }
+        let value = Rc::make_mut(&mut entry);
+        input.read_entry(value).map_err(gimli_error)?;
+        if value.is_null() {
+            return Err(gimli_error(gimli::Error::NoEntryAtGivenOffset(
+                offset.0 as u64,
+            )));
+        }
+        if let Some(slot) = cached.get_mut(index) {
+            *slot = Some((key, Rc::clone(&entry)));
+        }
+        Ok(entry)
     }
 
     fn unit_containing_offset(&self, target: usize) -> Result<Option<ReferencedUnit<R>>> {
@@ -185,7 +242,7 @@ impl<'a> DeclarationResolver<'a> {
                         offset: absolute_entry_offset(unit, offset)?,
                     };
                     if self.visited.insert(key) {
-                        let referenced = unit.entry(offset).map_err(gimli_error)?;
+                        let referenced = dwarf.entry(unit, offset)?;
                         if let Some(line) = self.resolve(
                             dwarf,
                             unit,
@@ -242,7 +299,7 @@ impl<'a> DeclarationResolver<'a> {
         let Some((unit, offset)) = dwarf.unit_containing_offset(target)? else {
             return Ok(None);
         };
-        let referenced = unit.entry(offset).map_err(gimli_error)?;
+        let referenced = dwarf.entry(&unit, offset)?;
         let files = unit.line_program.as_ref().map_or_else(
             || Ok(FileIndices::default()),
             |program| intern_header_files(dwarf.dwarf, &unit, program.header(), self.builder),
@@ -295,7 +352,7 @@ fn resolve_name_inner<R: Reader<Offset = usize>>(
                     offset: absolute_entry_offset(unit, offset)?,
                 };
                 if visited.insert(key) {
-                    let referenced = unit.entry(offset).map_err(gimli_error)?;
+                    let referenced = dwarf.entry(unit, offset)?;
                     if let Some(name) = resolve_name_inner(
                         dwarf,
                         unit,
@@ -354,7 +411,7 @@ pub(super) fn resolve_reference_name<R: Reader<Offset = usize>>(
         if !visited.insert(key) {
             return Ok(None);
         }
-        let entry = unit.entry(*offset).map_err(gimli_error)?;
+        let entry = dwarf.entry(unit, *offset)?;
         resolve_name_inner(dwarf, unit, &entry, DebugSource::Main, next, visited)
     } else if let AttributeValue::DebugInfoRef(offset) = reference {
         resolve_absolute_name(dwarf, offset.0, DebugSource::Main, next, visited)
@@ -393,7 +450,7 @@ fn resolve_absolute_name<R: Reader<Offset = usize>>(
     let Some((unit, offset)) = dwarf.unit_containing_offset(target)? else {
         return Ok(None);
     };
-    let referenced = unit.entry(offset).map_err(gimli_error)?;
+    let referenced = dwarf.entry(&unit, offset)?;
     resolve_name_inner(dwarf, &unit, &referenced, source, depth, visited)
 }
 
@@ -467,9 +524,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn referenced_entries_are_reused_and_preserve_lookup_errors() {
+        let sections = sections(1, b"unit");
+        let dwarf = sections.borrow(|data| EndianSlice::new(data, LittleEndian));
+        let unit = dwarf.unit(dwarf.units().next().unwrap().unwrap()).unwrap();
+        let resolver = DwarfResolver::new(&dwarf);
+        let entry = resolver.entry(&unit, gimli::UnitOffset(11)).unwrap();
+        let attributes = entry.attrs().as_ptr();
+        drop(entry);
+        let entry = resolver.entry(&unit, gimli::UnitOffset(11)).unwrap();
+        assert_eq!(entry.attrs().as_ptr(), attributes);
+        drop(entry);
+
+        for offset in [16, 17] {
+            let expected = gimli_error(unit.entry(gimli::UnitOffset(offset)).unwrap_err());
+            let actual = resolver
+                .entry(&unit, gimli::UnitOffset(offset))
+                .err()
+                .unwrap();
+            assert_eq!(actual.to_string(), expected.to_string());
+        }
+        let entry = resolver.entry(&unit, gimli::UnitOffset(11)).unwrap();
+        assert_eq!(entry.tag(), gimli::DW_TAG_compile_unit);
+    }
+
+    #[test]
+    fn entry_cache_eviction_preserves_entries_owned_by_recursive_callers() {
+        let names: Vec<_> = (0..=ENTRY_CACHE_CAPACITY)
+            .map(|index| format!("unit-{index}"))
+            .collect();
+        let sections = named_sections(names.iter().map(String::as_bytes));
+        let dwarf = sections.borrow(|data| EndianSlice::new(data, LittleEndian));
+        let resolver = DwarfResolver::new(&dwarf);
+        let mut headers = dwarf.units();
+        let mut held = Vec::new();
+        while let Some(header) = headers.next().unwrap() {
+            let unit = dwarf.unit(header).unwrap();
+            let entry = resolver.entry(&unit, gimli::UnitOffset(11)).unwrap();
+            assert!(held.iter().all(|(_, old)| !Rc::ptr_eq(old, &entry)));
+            held.push((unit, entry));
+        }
+        assert_eq!(resolver.entries.borrow().len(), ENTRY_CACHE_CAPACITY);
+        let (unit, old) = held
+            .iter()
+            .find(|(_, entry)| {
+                !resolver
+                    .entries
+                    .borrow()
+                    .iter()
+                    .flatten()
+                    .any(|(_, cached)| Rc::ptr_eq(entry, cached))
+            })
+            .unwrap();
+        let reloaded = resolver.entry(unit, gimli::UnitOffset(11)).unwrap();
+        assert!(!Rc::ptr_eq(old, &reloaded));
+        for ((_, entry), name) in held.iter().zip(&names) {
+            let actual = entry
+                .attr_value(gimli::DW_AT_name)
+                .unwrap()
+                .string_value(&dwarf.debug_str)
+                .unwrap()
+                .to_slice()
+                .unwrap()
+                .into_owned();
+            assert_eq!(actual, name.as_bytes());
+        }
+    }
+
     fn sections(count: usize, name: &[u8]) -> DwarfSections<Vec<u8>> {
+        named_sections(std::iter::repeat_n(name, count))
+    }
+
+    fn named_sections<'a>(names: impl IntoIterator<Item = &'a [u8]>) -> DwarfSections<Vec<u8>> {
         let mut info = Vec::new();
-        for _ in 0..count {
+        for name in names {
             info.extend_from_slice(
                 &u32::try_from(name.len().saturating_add(9))
                     .unwrap()
@@ -530,8 +659,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!Rc::ptr_eq(&main, &sup));
-        let name = |unit: &Unit<_>, offset| {
-            unit.entry(offset)
+        let name = |source: &DwarfResolver<'_, _>, unit: &Unit<_>, offset| {
+            source
+                .entry(unit, offset)
                 .unwrap()
                 .attr_value(gimli::DW_AT_name)
                 .unwrap()
@@ -541,7 +671,10 @@ mod tests {
                 .unwrap()
                 .into_owned()
         };
-        assert_eq!(name(&main, offset), b"main");
-        assert_eq!(name(&sup, sup_offset), b"supplementary");
+        assert_eq!(name(&resolver, &main, offset), b"main");
+        assert_eq!(
+            name(resolver.sup().unwrap(), &sup, sup_offset),
+            b"supplementary"
+        );
     }
 }
