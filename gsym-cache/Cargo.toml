@@ -1,6 +1,6 @@
 [package]
 name = "gsym-cache"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 description = "A small, concurrent Linux filesystem cache for immutable GSYM files"

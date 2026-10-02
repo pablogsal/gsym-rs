@@ -16,7 +16,7 @@ Use the library from Cargo:
 
 ```toml
 [dependencies]
-gsym-rs = "0.1"
+gsym-rs = "0.2"
 ```
 
 Install the command-line tool:
@@ -136,7 +136,7 @@ Reader and writer only:
 
 ```toml
 [dependencies]
-gsym-rs = { version = "0.1", default-features = false }
+gsym-rs = { version = "0.2", default-features = false }
 ```
 
 ## License
