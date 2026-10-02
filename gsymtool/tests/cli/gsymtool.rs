@@ -481,7 +481,7 @@ fn cmdline_transcodes_and_segments_existing_gsym_files() {
                 .starts_with("shard.gsym-0x")
         })
         .collect::<Vec<_>>();
-    assert!(!shards.is_empty());
+    assert_ne!(shards.len(), 0);
     for shard in shards {
         let bytes = std::fs::read(shard).unwrap();
         Gsym::parse(&bytes).unwrap().verify().unwrap();

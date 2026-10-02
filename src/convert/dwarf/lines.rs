@@ -586,7 +586,7 @@ mod tests {
         let mut builder = GsymBuilder::new();
         let mut warnings = Vec::new();
         let lines = collect_lines(&dwarf, &unit, &mut builder, &mut warnings).unwrap();
-        assert!(warnings.is_empty());
+        assert_eq!(warnings.len(), 0);
         assert_eq!(lines.entries.len(), 1);
         assert_eq!(
             lines.entries.first().unwrap().entry,

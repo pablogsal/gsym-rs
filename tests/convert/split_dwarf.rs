@@ -220,7 +220,7 @@ fn compile_split_dwarf_image(directory: &std::path::Path) -> std::path::PathBuf 
         image.to_str().unwrap(),
         source.to_str().unwrap(),
     ]));
-    assert!(!dwo_files(directory).is_empty());
+    assert_ne!(dwo_files(directory).len(), 0);
     image
 }
 
@@ -243,7 +243,7 @@ fn disabled_discovery_ignores_individual_dwo_files() {
     );
     assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
     assert_eq!(report.stats.split_dwarf_units, 0);
-    assert!(report.builder.functions().is_empty());
+    assert_eq!(report.builder.functions().len(), 0);
 }
 
 #[test]
@@ -548,7 +548,7 @@ fn imports_multi_unit_dwarf4_and_dwarf5_packages() {
             "{dwarf_version}: {:?}",
             report.warnings
         );
-        assert!(!second.lines.is_empty());
+        assert_ne!(second.lines.len(), 0);
         assert_function_addresses(
             &report,
             &image,

@@ -416,7 +416,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(call_sites.is_empty());
+        assert_eq!(call_sites.len(), 0);
         assert_eq!(count, 1);
         let root = inline.unwrap();
         let [child] = root.children.as_slice() else {

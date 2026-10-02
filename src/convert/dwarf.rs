@@ -799,11 +799,12 @@ mod tests {
         assert_eq!(first.address, 0x1010);
         assert_eq!(first.line, 10);
         assert_eq!(second.address, 0x1020);
-        assert!(
+        assert_eq!(
             lines
                 .for_range(AddressRange::new(0x1800, 0x1810), None)
                 .0
-                .is_empty()
+                .len(),
+            0
         );
     }
 

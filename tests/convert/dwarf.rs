@@ -388,7 +388,7 @@ fn invalid_declaration_file_indexes_warn_and_do_not_drop_functions() {
     assert_eq!(valid.lines[0].line, 20);
     let invalid = find_function(&report, b"invalid_decl")
         .expect("an invalid declaration file must not discard the function");
-    assert!(invalid.lines.is_empty());
+    assert_eq!(invalid.lines.len(), 0);
     assert!(report.warnings.iter().any(|warning| matches!(
         warning,
         ConversionWarning::InvalidDeclarationFile { index: 10, .. }
@@ -499,5 +499,5 @@ int main(void) {
     let lookup = gsym.lookup(inline_address).unwrap().unwrap();
     assert_eq!(lookup.frames().last().unwrap().name, b"target");
     assert!(lookup.frames().len() >= 2);
-    assert!(!lookup.frames()[0].basename.is_empty());
+    assert_ne!(lookup.frames()[0].basename.len(), 0);
 }

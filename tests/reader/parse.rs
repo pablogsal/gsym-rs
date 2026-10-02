@@ -63,7 +63,7 @@ fn reads_independent_v2_fixtures_in_both_byte_orders() {
         let bytes = minimal_v2(order);
         let gsym = Gsym::parse(&bytes).unwrap();
 
-        assert!(gsym.build_id().is_empty());
+        assert_eq!(gsym.build_id().len(), 0);
         assert_eq!(gsym.functions().count(), 2);
         assert_eq!(name_at(&gsym, 0x1000), b"alpha");
         assert_eq!(name_at(&gsym, 0x1020), b"beta");

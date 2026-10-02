@@ -124,7 +124,7 @@ fuzz_target!(|case: Case| {
         let segments = first_model
             .segments(2048, target)
             .expect("valid decoded data must segment");
-        assert!(!segments.is_empty());
+        assert_ne!(segments.len(), 0);
         assert_eq!(
             segments
                 .iter()
