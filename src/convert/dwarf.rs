@@ -333,11 +333,9 @@ fn import_unit_details<R: Reader<Offset = usize>>(
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
     let resolver = DwarfResolver::new(dwarf);
-    let mut entries = unit.entries();
-    while let Some(entry) = entries.next_dfs().map_err(gimli_error)? {
-        if entry.tag() != gimli::constants::DW_TAG_subprogram {
-            continue;
-        }
+    let mut entries = unit.entries_raw(None).map_err(gimli_error)?;
+    let mut entry = DebuggingInformationEntry::null();
+    while let Some(entry) = next_subprogram(&mut entries, &mut entry).map_err(gimli_error)? {
         let Some(name) = resolve_name(&resolver, unit, entry, 0)? else {
             continue;
         };
@@ -440,6 +438,28 @@ fn import_unit_details<R: Reader<Offset = usize>>(
         }
     }
     Ok(())
+}
+
+fn next_subprogram<'entry, R: Reader>(
+    entries: &mut gimli::EntriesRaw<'_, R>,
+    entry: &'entry mut DebuggingInformationEntry<R>,
+) -> gimli::Result<Option<&'entry DebuggingInformationEntry<R>>> {
+    while !entries.is_empty() {
+        let mut probe = entries.clone();
+        if let Some(abbreviation) = probe.read_abbreviation()? {
+            if abbreviation.tag() == gimli::DW_TAG_subprogram {
+                entries.read_entry(entry)?;
+                return Ok(Some(entry));
+            }
+            // Parse unused attributes to preserve errors, but avoid building
+            // an attribute vector for entries the importer does not consume.
+            for specification in abbreviation.attributes() {
+                drop(probe.read_attribute_inline(*specification)?);
+            }
+        }
+        *entries = probe;
+    }
+    Ok(None)
 }
 
 fn load_dwo<R: Reader<Offset = usize>>(
@@ -567,6 +587,59 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn subprogram_scan_preserves_entries_and_attribute_errors() {
+        for form in [
+            0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+        ] {
+            let abbrev = [1, 0x34, 1, 3, form, 0, 0, 2, 0x2e, 0, 3, 8, 0, 0, 0];
+            let abbrev = gimli::DebugAbbrev::new(&abbrev, gimli::LittleEndian)
+                .abbreviations(gimli::DebugAbbrevOffset(0))
+                .unwrap();
+            for length in 0..=24 {
+                for value in [0, 1, 0x80, 0xff] {
+                    let mut body = vec![1];
+                    body.extend(std::iter::repeat_n(value, length));
+                    body.extend_from_slice(&[0, 2, b'f', 0, 0]);
+                    let mut data = u32::try_from(body.len() + 7)
+                        .unwrap()
+                        .to_le_bytes()
+                        .to_vec();
+                    data.extend_from_slice(&[4, 0, 0, 0, 0, 0, 8]);
+                    data.extend(body);
+                    let info = gimli::DebugInfo::new(&data, gimli::LittleEndian);
+                    let header = info.units().next().unwrap().unwrap();
+                    let mut original = header.entries(&abbrev);
+                    let mut raw = header.entries_raw(&abbrev, None).unwrap();
+                    let mut entry = DebuggingInformationEntry::null();
+                    assert_subprogram_scan_matches(&mut original, &mut raw, &mut entry);
+                }
+            }
+        }
+    }
+
+    fn assert_subprogram_scan_matches<R: Reader>(
+        original: &mut gimli::EntriesCursor<'_, R>,
+        raw: &mut gimli::EntriesRaw<'_, R>,
+        entry: &mut DebuggingInformationEntry<R>,
+    ) {
+        loop {
+            let expected = loop {
+                match original.next_dfs() {
+                    Ok(Some(entry)) if entry.tag() != gimli::DW_TAG_subprogram => {}
+                    outcome => break outcome.map(|entry| entry.map(|entry| format!("{entry:?}"))),
+                }
+            };
+            let actual =
+                next_subprogram(raw, entry).map(|entry| entry.map(|entry| format!("{entry:?}")));
+            assert_eq!(actual, expected);
+            if !matches!(actual, Ok(Some(_))) {
+                break;
+            }
+        }
+    }
 
     #[test]
     fn abbreviations_are_reused_even_when_only_one_unit_uses_the_table() {
