@@ -1,15 +1,15 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 
 use gimli::{AttributeValue, DebuggingInformationEntry, Reader, Unit};
 use smallvec::SmallVec;
 
-use super::lines::intern_header_files;
+use super::lines::{FileIndices, intern_header_files};
 use super::{file_index_attribute, gimli_error, unsigned_attribute};
 use crate::convert::ConversionWarning;
-use crate::model::{FileIndex, LineEntry};
+use crate::model::LineEntry;
 use crate::{Error, GsymBuilder, Result};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -107,7 +107,7 @@ pub(super) fn resolve_declaration_line<R: Reader<Offset = usize>>(
     dwarf: &DwarfResolver<'_, R>,
     unit: &Unit<R>,
     entry: &DebuggingInformationEntry<R>,
-    files: &HashMap<u64, FileIndex>,
+    files: &FileIndices,
     builder: &mut GsymBuilder,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Result<Option<LineEntry>> {
@@ -141,7 +141,7 @@ impl<'a> DeclarationResolver<'a> {
         dwarf: &DwarfResolver<'_, R>,
         unit: &Unit<R>,
         entry: &DebuggingInformationEntry<R>,
-        files: &HashMap<u64, FileIndex>,
+        files: &FileIndices,
         source: DebugSource,
         depth: u8,
     ) -> Result<Option<LineEntry>> {
@@ -152,7 +152,7 @@ impl<'a> DeclarationResolver<'a> {
             file_index_attribute(entry, gimli::constants::DW_AT_decl_file),
             unsigned_attribute(entry, gimli::constants::DW_AT_decl_line),
         ) {
-            match (files.get(&file_index).copied(), u32::try_from(line_number)) {
+            match (files.get(file_index), u32::try_from(line_number)) {
                 (Some(file), Ok(line)) => {
                     return Ok(Some(LineEntry {
                         address: 0,
@@ -244,7 +244,7 @@ impl<'a> DeclarationResolver<'a> {
         };
         let referenced = unit.entry(offset).map_err(gimli_error)?;
         let files = unit.line_program.as_ref().map_or_else(
-            || Ok(HashMap::new()),
+            || Ok(FileIndices::default()),
             |program| intern_header_files(dwarf.dwarf, &unit, program.header(), self.builder),
         )?;
         self.resolve(dwarf, &unit, &referenced, &files, source, depth)

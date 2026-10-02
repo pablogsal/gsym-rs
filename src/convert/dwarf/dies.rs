@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
 use gimli::{DebuggingInformationEntry, Reader, Unit};
 
+use super::lines::FileIndices;
 use super::references::{
     DwarfResolver, VisitedDies, absolute_entry_offset, resolve_name, resolve_reference_name,
 };
@@ -37,7 +36,7 @@ struct DetailContext<'data, 'warnings, R: Reader<Offset = usize>> {
     dwarf: &'data DwarfResolver<'data, R>,
     unit: &'data Unit<R>,
     function_range: AddressRange,
-    file_indices: &'data HashMap<u64, FileIndex>,
+    file_indices: &'data FileIndices,
     include_inlines: bool,
     include_call_sites: bool,
     warnings: &'warnings mut Vec<ConversionWarning>,
@@ -49,7 +48,7 @@ pub(super) fn extract_subprogram_details<R: Reader<Offset = usize>>(
     offset: gimli::UnitOffset<usize>,
     function_range: AddressRange,
     function_name: &[u8],
-    file_indices: &HashMap<u64, FileIndex>,
+    file_indices: &FileIndices,
     options: &mut DetailOptions<'_>,
 ) -> Result<(Option<InlineNode>, Vec<CallSite>, usize)> {
     if !options.include_inlines && !options.include_call_sites {
@@ -187,7 +186,7 @@ fn make_inline_node<R: Reader<Offset = usize>>(
     unit: &Unit<R>,
     entry: &DebuggingInformationEntry<R>,
     parent_ranges: &[AddressRange],
-    file_indices: &HashMap<u64, FileIndex>,
+    file_indices: &FileIndices,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Result<Option<InlineNode>> {
     let Some(name) = resolve_name(dwarf, unit, entry, 0)? else {
@@ -213,7 +212,7 @@ fn make_inline_node<R: Reader<Offset = usize>>(
     }
     let call_file = match file_index_attribute(entry, gimli::constants::DW_AT_call_file) {
         Some(dwarf_index) => {
-            if let Some(index) = file_indices.get(&dwarf_index).copied() {
+            if let Some(index) = file_indices.get(dwarf_index) {
                 index
             } else {
                 warnings.push(ConversionWarning::MissingInlineCallFile {
@@ -408,7 +407,7 @@ mod tests {
             subprogram_offset,
             AddressRange::new(0x1000, 0x1100),
             b"root",
-            &HashMap::new(),
+            &FileIndices::default(),
             &mut DetailOptions {
                 include_inlines: true,
                 include_call_sites: false,

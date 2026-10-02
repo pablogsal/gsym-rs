@@ -22,9 +22,40 @@ pub(super) struct LineSequenceRange {
     pub(super) statement_sequence: Option<u64>,
 }
 
+#[derive(Default)]
+pub(super) struct FileIndices {
+    dense: Vec<Option<FileIndex>>,
+    // On 32-bit targets Gimli can accept a u64 index after truncating it to
+    // usize. Preserve the mapping under the original index when that happens.
+    overflow: HashMap<u64, FileIndex>,
+}
+
+impl FileIndices {
+    pub(super) fn is_empty(&self) -> bool {
+        self.dense.iter().all(Option::is_none) && self.overflow.is_empty()
+    }
+
+    pub(super) fn get(&self, index: u64) -> Option<FileIndex> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.dense.get(index).copied().flatten())
+            .or_else(|| self.overflow.get(&index).copied())
+    }
+
+    fn insert(&mut self, index: u64, file: FileIndex) {
+        if let Ok(index) = usize::try_from(index)
+            && let Some(slot) = self.dense.get_mut(index)
+        {
+            *slot = Some(file);
+        } else {
+            self.overflow.insert(index, file);
+        }
+    }
+}
+
 pub(super) struct UnitLines {
     pub(super) entries: Vec<SequencedLine>,
-    pub(super) files: HashMap<u64, FileIndex>,
+    pub(super) files: FileIndices,
     pub(super) sequences: Vec<LineSequenceRange>,
 }
 
@@ -116,7 +147,7 @@ pub(super) fn collect_lines<R: Reader<Offset = usize>>(
     } else {
         return Ok(UnitLines {
             entries: Vec::new(),
-            files: HashMap::new(),
+            files: FileIndices::default(),
             sequences: Vec::new(),
         });
     };
@@ -170,7 +201,7 @@ pub(super) fn collect_lines<R: Reader<Offset = usize>>(
     let mut output = raw_lines
         .into_iter()
         .filter_map(|(address, dwarf_index, line, sequence_index)| {
-            let file = if let Some(file) = files.get(&dwarf_index).copied() {
+            let file = if let Some(file) = files.get(dwarf_index) {
                 file
             } else {
                 let Some(entry) = header.file(dwarf_index) else {
@@ -368,18 +399,18 @@ pub(super) fn intern_header_files<R: Reader<Offset = usize>>(
     unit: &gimli::Unit<R>,
     header: &gimli::LineProgramHeader<R>,
     builder: &mut GsymBuilder,
-) -> Result<HashMap<u64, FileIndex>> {
-    let first_file_index = u64::from(header.version() <= 4);
-    let mut files = HashMap::with_capacity(header.file_names().len());
-    for (offset, file) in header.file_names().iter().enumerate() {
-        let dwarf_index = first_file_index
-            .checked_add(
-                u64::try_from(offset).map_err(|_| Error::Overflow("DWARF file-table index"))?,
-            )
-            .ok_or(Error::Overflow("DWARF file-table index"))?;
-        if let Some(gsym_index) = intern_file(dwarf, unit, header, file, builder)? {
-            files.insert(dwarf_index, gsym_index);
-        }
+) -> Result<FileIndices> {
+    let mut files = FileIndices {
+        dense: Vec::with_capacity(header.file_names().len().saturating_add(1)),
+        ..FileIndices::default()
+    };
+    if header.version() <= 4 {
+        files.dense.push(None);
+    }
+    for file in header.file_names() {
+        files
+            .dense
+            .push(intern_file(dwarf, unit, header, file, builder)?);
     }
     Ok(files)
 }
@@ -502,6 +533,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dense_file_indices_preserve_holes_and_reject_large_offsets() {
+        let mut files = FileIndices {
+            dense: vec![None, Some(FileIndex::new(7)), None],
+            ..FileIndices::default()
+        };
+        assert!(!files.is_empty());
+        assert_eq!(files.get(0), None);
+        assert_eq!(files.get(1), Some(FileIndex::new(7)));
+        assert_eq!(files.get(2), None);
+        assert_eq!(files.get(u64::MAX), None);
+        files.insert(u64::MAX, FileIndex::new(11));
+        assert_eq!(files.get(u64::MAX), Some(FileIndex::new(11)));
+        files.insert(0, FileIndex::new(9));
+        assert_eq!(files.get(0), Some(FileIndex::new(9)));
+        assert!(
+            FileIndices {
+                dense: vec![None, None],
+                ..FileIndices::default()
+            }
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn line_import_uses_the_complete_file_table_and_discards_unterminated_rows() {
         let mut instructions = vec![0, 9, gimli::DW_LNE_set_address.0];
         instructions.extend_from_slice(&0x1000_u64.to_le_bytes());
@@ -536,7 +591,7 @@ mod tests {
         assert_eq!(lines.entries.len(), 1);
         assert_eq!(
             lines.entries.first().unwrap().entry,
-            LineEntry::new(0x1000, lines.files.get(&2).copied().unwrap(), 1)
+            LineEntry::new(0x1000, lines.files.get(2).unwrap(), 1)
         );
         assert_eq!(lines.sequences.len(), 1);
         assert_eq!(

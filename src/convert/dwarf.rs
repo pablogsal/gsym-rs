@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use gimli::{
@@ -31,7 +30,7 @@ use super::ConversionWarning;
 use super::elf::{AddressLayout, ConversionStats};
 #[cfg(test)]
 use crate::model::LineEntry;
-use crate::model::{AddressRange, FileIndex, Function};
+use crate::model::{AddressRange, Function};
 use crate::{ElfInputKind, Error, GsymBuilder, Result};
 
 const DW_AT_LLVM_STMT_SEQUENCE: gimli::DwAt = gimli::DwAt(0x3e0c);
@@ -330,7 +329,7 @@ fn import_unit_details<R: Reader<Offset = usize>>(
     dwarf: &Dwarf<R>,
     unit: &Unit<R>,
     executable_lines: &UnitLines,
-    file_indices: &HashMap<u64, FileIndex>,
+    file_indices: &lines::FileIndices,
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
     let resolver = DwarfResolver::new(dwarf);
@@ -565,7 +564,6 @@ fn is_live_range(range: AddressRange, executable_ranges: &[AddressRange]) -> boo
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::*;
@@ -708,7 +706,7 @@ mod tests {
                     statement_sequence: Some(0x40),
                 },
             ],
-            files: HashMap::new(),
+            files: lines::FileIndices::default(),
             sequences: vec![
                 LineSequenceRange {
                     range: AddressRange::new(0x1000, 0x1100),
@@ -757,7 +755,7 @@ mod tests {
                     statement_sequence: Some(0x40),
                 },
             ],
-            files: HashMap::new(),
+            files: lines::FileIndices::default(),
             sequences: vec![
                 LineSequenceRange {
                     range: AddressRange::new(0x1000, 0x1100),
@@ -800,7 +798,7 @@ mod tests {
                 row(0x1008, 2, 10),
                 row(0x100c, 2, 10),
             ],
-            files: HashMap::new(),
+            files: lines::FileIndices::default(),
             sequences: vec![LineSequenceRange {
                 range: AddressRange::new(0x1000, 0x1010),
                 statement_sequence: Some(0x29),
