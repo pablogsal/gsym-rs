@@ -506,15 +506,14 @@ impl<D: AsRef<[u8]>> Gsym<D> {
         Ok(VerifyReport {
             functions: self.layout.address_count as usize,
             files: self.layout.file_count as usize,
-            strings: self
-                .data
-                .as_ref()
-                .get(self.layout.string_table.clone())
-                .unwrap_or_default()
-                .iter()
-                .fold(0_usize, |total, byte| {
-                    total.saturating_add(usize::from(*byte == 0))
-                }),
+            strings: memchr::memchr_iter(
+                0,
+                self.data
+                    .as_ref()
+                    .get(self.layout.string_table.clone())
+                    .unwrap_or_default(),
+            )
+            .count(),
             function_info_bytes: self.layout.function_info.len(),
         })
     }

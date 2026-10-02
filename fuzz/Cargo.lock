@@ -127,6 +127,7 @@ dependencies = [
  "hashbrown",
  "hex",
  "lzma-rs",
+ "memchr",
  "object",
  "smallvec",
  "thiserror",

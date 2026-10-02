@@ -647,6 +647,7 @@ dependencies = [
  "hashbrown",
  "hex",
  "lzma-rs",
+ "memchr",
  "memmap2",
  "mimalloc",
  "object",
