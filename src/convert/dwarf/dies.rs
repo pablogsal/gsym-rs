@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gimli::{DebuggingInformationEntry, Reader, Unit};
 
 use super::references::{
-    DwarfResolver, absolute_entry_offset, resolve_name, resolve_reference_name,
+    DwarfResolver, VisitedDies, absolute_entry_offset, resolve_name, resolve_reference_name,
 };
 use super::{file_index_attribute, gimli_error, unsigned_attribute};
 use crate::Result;
@@ -280,7 +280,7 @@ fn make_call_site<R: Reader<Offset = usize>>(
     };
     let mut patterns = Vec::new();
     if let Some(origin) = entry.attr_value(gimli::constants::DW_AT_call_origin) {
-        let mut visited = HashSet::new();
+        let mut visited = VisitedDies::default();
         if let Some(name) = resolve_reference_name(dwarf, unit, &origin, 0, &mut visited)? {
             patterns.push(name);
         }

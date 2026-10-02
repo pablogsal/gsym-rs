@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use gimli::{AttributeValue, DebuggingInformationEntry, Reader, Unit};
+use smallvec::SmallVec;
 
 use super::lines::intern_header_files;
 use super::{file_index_attribute, gimli_error, unsigned_attribute};
@@ -21,6 +22,38 @@ enum DebugSource {
 pub(super) struct DieKey {
     source: DebugSource,
     offset: usize,
+}
+
+// Reference chains usually contain only one or two entries. Keep those on
+// the stack while retaining hashed lookup for large, branching graphs.
+pub(super) enum VisitedDies {
+    Small(SmallVec<[DieKey; 4]>),
+    Large(HashSet<DieKey>),
+}
+
+impl Default for VisitedDies {
+    fn default() -> Self {
+        Self::Small(SmallVec::new())
+    }
+}
+
+impl VisitedDies {
+    fn insert(&mut self, key: DieKey) -> bool {
+        match self {
+            Self::Small(keys) => {
+                if keys.contains(&key) {
+                    return false;
+                }
+                if keys.len() < keys.inline_size() {
+                    keys.push(key);
+                } else {
+                    *self = Self::Large(keys.iter().copied().chain([key]).collect());
+                }
+                true
+            }
+            Self::Large(keys) => keys.insert(key),
+        }
+    }
 }
 
 type ReferencedUnit<R> = (Rc<Unit<R>>, gimli::UnitOffset<usize>);
@@ -91,7 +124,7 @@ pub(super) fn resolve_declaration_line<R: Reader<Offset = usize>>(
 struct DeclarationResolver<'a> {
     builder: &'a mut GsymBuilder,
     warnings: &'a mut Vec<ConversionWarning>,
-    visited: HashSet<DieKey>,
+    visited: VisitedDies,
 }
 
 impl<'a> DeclarationResolver<'a> {
@@ -99,7 +132,7 @@ impl<'a> DeclarationResolver<'a> {
         Self {
             builder,
             warnings,
-            visited: HashSet::new(),
+            visited: VisitedDies::default(),
         }
     }
 
@@ -224,7 +257,7 @@ pub(super) fn resolve_name<R: Reader<Offset = usize>>(
     entry: &DebuggingInformationEntry<R>,
     depth: u8,
 ) -> Result<Option<Vec<u8>>> {
-    let mut visited = HashSet::new();
+    let mut visited = VisitedDies::default();
     resolve_name_inner(dwarf, unit, entry, DebugSource::Main, depth, &mut visited)
 }
 
@@ -234,7 +267,7 @@ fn resolve_name_inner<R: Reader<Offset = usize>>(
     entry: &DebuggingInformationEntry<R>,
     source: DebugSource,
     depth: u8,
-    visited: &mut HashSet<DieKey>,
+    visited: &mut VisitedDies,
 ) -> Result<Option<Vec<u8>>> {
     if depth >= 64 {
         return Ok(None);
@@ -310,7 +343,7 @@ pub(super) fn resolve_reference_name<R: Reader<Offset = usize>>(
     unit: &Unit<R>,
     reference: &AttributeValue<R>,
     depth: u8,
-    visited: &mut HashSet<DieKey>,
+    visited: &mut VisitedDies,
 ) -> Result<Option<Vec<u8>>> {
     let next = depth.saturating_add(1);
     if let AttributeValue::UnitRef(offset) = reference {
@@ -349,7 +382,7 @@ fn resolve_absolute_name<R: Reader<Offset = usize>>(
     target: usize,
     source: DebugSource,
     depth: u8,
-    visited: &mut HashSet<DieKey>,
+    visited: &mut VisitedDies,
 ) -> Result<Option<Vec<u8>>> {
     if !visited.insert(DieKey {
         source,
@@ -416,6 +449,23 @@ mod tests {
     use gimli::{DwarfSections, EndianSlice, LittleEndian, SectionId};
 
     use super::*;
+
+    #[test]
+    fn visited_entries_match_a_set_before_and_after_spilling() {
+        let mut visited = VisitedDies::default();
+        let mut expected = HashSet::new();
+        for index in 0..300 {
+            let key = DieKey {
+                source: if index % 7 == 0 {
+                    DebugSource::Supplementary
+                } else {
+                    DebugSource::Main
+                },
+                offset: index % 31,
+            };
+            assert_eq!(visited.insert(key), expected.insert(key));
+        }
+    }
 
     fn sections(count: usize, name: &[u8]) -> DwarfSections<Vec<u8>> {
         let mut info = Vec::new();
