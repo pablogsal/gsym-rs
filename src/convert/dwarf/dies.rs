@@ -158,6 +158,9 @@ fn finish_inline(stack: &mut Vec<InlineFrame>, roots: &mut Vec<InlineNode>) {
     frame.node.name.shrink_to_fit();
     frame.node.children.shrink_to_fit();
     if let Some(parent) = stack.last_mut() {
+        if parent.node.children.is_empty() {
+            parent.node.children.reserve_exact(1);
+        }
         parent.node.children.push(frame.node);
     } else {
         roots.push(frame.node);
@@ -191,7 +194,9 @@ fn make_inline_node<R: Reader<Offset = usize>>(
         return Ok(None);
     };
     let mut ranges = dwarf.dwarf.die_ranges(unit, entry).map_err(gimli_error)?;
-    let mut valid_ranges = Vec::new();
+    // Most inline instances have one range. Avoid growing to four entries and
+    // reallocating again when finish_inline shrinks the vector.
+    let mut valid_ranges = Vec::with_capacity(1);
     while let Some(range) = ranges.next().map_err(gimli_error)? {
         let candidate = AddressRange::new(range.begin, range.end);
         if range.begin < range.end
