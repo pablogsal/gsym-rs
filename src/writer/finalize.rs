@@ -54,31 +54,25 @@ fn sort_by_ordering_key(mut functions: Vec<Function>) -> Vec<Function> {
     functions
 }
 
-fn merge_equal_ranges(functions: Vec<Function>) -> Vec<Function> {
-    let mut merged: Vec<Function> = Vec::with_capacity(functions.len());
-    for function in functions {
-        if let Some(parent) = merged.last_mut()
-            && parent.range == function.range
-        {
-            let previous = parent.merged.last().unwrap_or(&*parent);
-            if *previous != function {
-                parent.merged.push(function);
-            }
-        } else {
-            merged.push(function);
+fn merge_equal_ranges(mut functions: Vec<Function>) -> Vec<Function> {
+    functions.dedup_by(|function, parent| {
+        if parent.range != function.range {
+            return false;
         }
-    }
-    merged
+        let previous = parent.merged.last().unwrap_or(&*parent);
+        if *previous != *function {
+            parent.merged.push(std::mem::take(function));
+        }
+        true
+    });
+    functions
 }
 
-fn deduplicate(functions: Vec<Function>) -> Vec<Function> {
-    let mut deduplicated: Vec<Function> = Vec::with_capacity(functions.len());
-    for mut function in functions {
-        if let Some(previous) = deduplicated.last_mut()
-            && previous.range == function.range
-        {
+fn deduplicate(mut functions: Vec<Function>) -> Vec<Function> {
+    functions.dedup_by(|function, previous| {
+        if previous.range == function.range {
             let previous_rich = has_rich_info(previous);
-            let current_rich = has_rich_info(&function);
+            let current_rich = has_rich_info(function);
             if previous_rich != current_rich {
                 if !previous_rich
                     && should_replace_with_mangled_name(&previous.name, &function.name)
@@ -86,23 +80,20 @@ fn deduplicate(functions: Vec<Function>) -> Vec<Function> {
                     function.name.clone_from(&previous.name);
                 }
                 if current_rich {
-                    *previous = function;
+                    std::mem::swap(previous, function);
                 }
-            } else if *previous != function {
-                *previous = function;
+            } else if *previous != *function {
+                std::mem::swap(previous, function);
             }
-            continue;
+            true
+        } else if previous.range.is_empty() && function.range.contains(previous.range.start) {
+            std::mem::swap(previous, function);
+            true
+        } else {
+            false
         }
-        if let Some(previous) = deduplicated.last_mut()
-            && previous.range.is_empty()
-            && function.range.contains(previous.range.start)
-        {
-            *previous = function;
-            continue;
-        }
-        deduplicated.push(function);
-    }
-    deduplicated
+    });
+    functions
 }
 
 fn repair_final_range(mut functions: Vec<Function>, options: &BuilderOptions) -> Vec<Function> {
