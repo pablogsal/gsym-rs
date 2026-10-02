@@ -71,12 +71,6 @@ impl UnitLines {
                 .any(|sequence| sequence.statement_sequence == Some(requested))
         });
         let selected_sequence = requested_sequence.filter(|_| sequence_exists);
-        let clamping_sequence = selected_sequence.or_else(|| {
-            self.sequences
-                .iter()
-                .find(|sequence| sequence.range.contains(range.start))
-                .and_then(|sequence| sequence.statement_sequence)
-        });
 
         let start = self
             .entries
@@ -95,11 +89,15 @@ impl UnitLines {
             .map(|line| line.entry)
             .collect::<Vec<_>>();
 
-        if self.sequences.iter().any(|sequence| {
-            selected_sequence.is_none_or(|selected| sequence.statement_sequence == Some(selected))
-                && sequence.range.contains(range.start)
-        }) && output.first().is_none_or(|line| line.address > range.start)
-            && let Some(previous) = self
+        if output.first().is_none_or(|line| line.address > range.start)
+            && let Some(sequence) = self.sequences.iter().find(|sequence| {
+                selected_sequence
+                    .is_none_or(|selected| sequence.statement_sequence == Some(selected))
+                    && sequence.range.contains(range.start)
+            })
+        {
+            let clamping_sequence = selected_sequence.or(sequence.statement_sequence);
+            if let Some(previous) = self
                 .entries
                 .get(..start)
                 .unwrap_or_default()
@@ -109,10 +107,11 @@ impl UnitLines {
                     clamping_sequence
                         .is_none_or(|selected| line.statement_sequence == Some(selected))
                 })
-        {
-            let mut clamped = previous.entry;
-            clamped.address = range.start;
-            output.insert(0, clamped);
+            {
+                let mut clamped = previous.entry;
+                clamped.address = range.start;
+                output.insert(0, clamped);
+            }
         }
         compact_line_rows(&mut output);
         let invalid_sequence =
