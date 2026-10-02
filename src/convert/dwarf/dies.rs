@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use gimli::{DebuggingInformationEntry, Dwarf, Reader, Unit};
+use gimli::{DebuggingInformationEntry, Reader, Unit};
 
-use super::references::{absolute_entry_offset, resolve_name, resolve_reference_name};
+use super::references::{
+    DwarfResolver, absolute_entry_offset, resolve_name, resolve_reference_name,
+};
 use super::{file_index_attribute, gimli_error, unsigned_attribute};
 use crate::Result;
 use crate::convert::ConversionWarning;
@@ -32,7 +34,7 @@ pub(super) struct DetailOptions<'a> {
 }
 
 struct DetailContext<'data, 'warnings, R: Reader<Offset = usize>> {
-    dwarf: &'data Dwarf<R>,
+    dwarf: &'data DwarfResolver<'data, R>,
     unit: &'data Unit<R>,
     function_range: AddressRange,
     file_indices: &'data HashMap<u64, FileIndex>,
@@ -42,7 +44,7 @@ struct DetailContext<'data, 'warnings, R: Reader<Offset = usize>> {
 }
 
 pub(super) fn extract_subprogram_details<R: Reader<Offset = usize>>(
-    dwarf: &Dwarf<R>,
+    dwarf: &DwarfResolver<'_, R>,
     unit: &Unit<R>,
     offset: gimli::UnitOffset<usize>,
     function_range: AddressRange,
@@ -178,7 +180,7 @@ fn finish_call_sites(
 }
 
 fn make_inline_node<R: Reader<Offset = usize>>(
-    dwarf: &Dwarf<R>,
+    dwarf: &DwarfResolver<'_, R>,
     unit: &Unit<R>,
     entry: &DebuggingInformationEntry<R>,
     parent_ranges: &[AddressRange],
@@ -188,7 +190,7 @@ fn make_inline_node<R: Reader<Offset = usize>>(
     let Some(name) = resolve_name(dwarf, unit, entry, 0)? else {
         return Ok(None);
     };
-    let mut ranges = dwarf.die_ranges(unit, entry).map_err(gimli_error)?;
+    let mut ranges = dwarf.dwarf.die_ranges(unit, entry).map_err(gimli_error)?;
     let mut valid_ranges = Vec::new();
     while let Some(range) = ranges.next().map_err(gimli_error)? {
         let candidate = AddressRange::new(range.begin, range.end);
@@ -250,7 +252,7 @@ fn coalesce_ranges(ranges: &mut Vec<AddressRange>) {
 }
 
 fn make_call_site<R: Reader<Offset = usize>>(
-    dwarf: &Dwarf<R>,
+    dwarf: &DwarfResolver<'_, R>,
     unit: &Unit<R>,
     entry: &DebuggingInformationEntry<R>,
     function_range: AddressRange,
@@ -259,6 +261,7 @@ fn make_call_site<R: Reader<Offset = usize>>(
         return Ok(None);
     };
     let Some(return_pc) = dwarf
+        .dwarf
         .attr_address(unit, return_pc_value)
         .map_err(gimli_error)?
     else {
@@ -395,7 +398,7 @@ mod tests {
         let subprogram_offset = entries.next_dfs().unwrap().unwrap().offset();
         let mut warnings = Vec::new();
         let (inline, call_sites, count) = extract_subprogram_details(
-            &dwarf,
+            &DwarfResolver::new(&dwarf),
             &unit,
             subprogram_offset,
             AddressRange::new(0x1000, 0x1100),

@@ -18,7 +18,9 @@ use lines::{LineSequenceRange, SequencedLine, scan_line_sequence_offsets};
 use lines::{UnitLines, collect_lines, statement_sequence_offset};
 #[cfg(test)]
 use object::{RelocationEncoding, RelocationKind};
-use references::{absolute_entry_offset, attribute_bytes, resolve_declaration_line, resolve_name};
+use references::{
+    DwarfResolver, absolute_entry_offset, attribute_bytes, resolve_declaration_line, resolve_name,
+};
 use sections::{
     DwarfRelocations, SectionData, load_dwo_section, load_dwo_section_owned, load_section,
 };
@@ -331,12 +333,13 @@ fn import_unit_details<R: Reader<Offset = usize>>(
     file_indices: &HashMap<u64, FileIndex>,
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
+    let resolver = DwarfResolver::new(dwarf);
     let mut entries = unit.entries();
     while let Some(entry) = entries.next_dfs().map_err(gimli_error)? {
         if entry.tag() != gimli::constants::DW_TAG_subprogram {
             continue;
         }
-        let Some(name) = resolve_name(dwarf, unit, entry, 0)? else {
+        let Some(name) = resolve_name(&resolver, unit, entry, 0)? else {
             continue;
         };
         let mut ranges = match dwarf.die_ranges(unit, entry) {
@@ -400,7 +403,7 @@ fn import_unit_details<R: Reader<Offset = usize>>(
             }
             if function_lines.is_empty()
                 && let Some(mut declaration) = resolve_declaration_line(
-                    dwarf,
+                    &resolver,
                     unit,
                     entry,
                     file_indices,
@@ -413,7 +416,7 @@ fn import_unit_details<R: Reader<Offset = usize>>(
             }
             context.stats.line_rows = context.stats.line_rows.saturating_add(function_lines.len());
             let (inline, call_sites, inline_count) = extract_subprogram_details(
-                dwarf,
+                &resolver,
                 unit,
                 entry.offset(),
                 AddressRange::new(range.begin, range.end),
