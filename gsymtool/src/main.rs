@@ -635,7 +635,7 @@ mod tests {
                 no_debuginfod: true,
             },
         );
-        assert!(options.debuginfod_urls.is_empty());
+        assert_eq!(options.debuginfod_urls.len(), 0);
 
         options.debuginfod_urls = vec!["https://debuginfod.example".to_owned()];
         apply_discovery_toggles(
@@ -646,7 +646,7 @@ mod tests {
             },
         );
         assert_eq!(options.discovery, DiscoveryPolicy::Disabled);
-        assert!(options.debuginfod_urls.is_empty());
+        assert_eq!(options.debuginfod_urls.len(), 0);
     }
 
     #[test]

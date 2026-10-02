@@ -110,7 +110,7 @@ fuzz_target!(|case: Case| {
     let parsed = Gsym::parse(forward).expect("writer output must parse");
     parsed.verify().expect("writer output must verify");
     let decoded = parsed.decode_all().expect("writer output must decode");
-    assert!(!decoded.functions.is_empty());
+    assert_ne!(decoded.functions.len(), 0);
     if merge && shares_a_range(&functions) {
         assert!(
             decoded

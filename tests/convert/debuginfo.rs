@@ -246,7 +246,7 @@ fn mini_debug_does_not_require_build_ids() {
     let report = ElfConverter::new(ConversionOptions::default())
         .convert_path(&embedded)
         .unwrap();
-    assert!(report.builder.options().writer.build_id.is_empty());
+    assert_eq!(report.builder.options().writer.build_id.len(), 0);
     assert!(
         report
             .builder
@@ -325,7 +325,7 @@ fn disabled_discovery_ignores_gnu_debuglink_companions() {
 
     assert!(report.discovered_debug.is_none());
     assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
-    assert!(report.builder.functions().is_empty());
+    assert_eq!(report.builder.functions().len(), 0);
 }
 
 #[test]
@@ -393,7 +393,7 @@ fn disabled_discovery_ignores_build_id_debug_roots() {
 
     assert!(report.discovered_debug.is_none());
     assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
-    assert!(report.builder.functions().is_empty());
+    assert_eq!(report.builder.functions().len(), 0);
 }
 
 #[cfg(feature = "debuginfod")]
@@ -434,7 +434,7 @@ fn downloads_validated_debuginfo_and_reuses_the_cache_offline() {
         .unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].0, "debug file");
-    assert!(!requests[0].1.is_empty());
+    assert_ne!(requests[0].1.len(), 0);
     assert_eq!(requests[0].2, expected_server);
     assert_eq!(requests[0].3, stripped);
     assert!(downloaded.stats.dwarf_functions > 0);
@@ -482,7 +482,7 @@ fn disabled_discovery_ignores_debuginfod_cache_and_servers() {
     assert_eq!(requests, 0);
     assert!(report.discovered_debug.is_none());
     assert_eq!(report.stats.dwarf_functions, 0, "{:?}", report.warnings);
-    assert!(report.builder.functions().is_empty());
+    assert_eq!(report.builder.functions().len(), 0);
 }
 
 #[cfg(feature = "debuginfod")]

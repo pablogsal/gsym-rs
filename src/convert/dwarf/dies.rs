@@ -1,8 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use gimli::{DebuggingInformationEntry, Reader, Unit};
 
-use gimli::{DebuggingInformationEntry, Dwarf, Reader, Unit};
-
-use super::references::{absolute_entry_offset, resolve_name, resolve_reference_name};
+use super::lines::FileIndices;
+use super::references::{
+    DwarfResolver, VisitedDies, absolute_entry_offset, resolve_name, resolve_reference_name,
+};
 use super::{file_index_attribute, gimli_error, unsigned_attribute};
 use crate::Result;
 use crate::convert::ConversionWarning;
@@ -32,22 +33,22 @@ pub(super) struct DetailOptions<'a> {
 }
 
 struct DetailContext<'data, 'warnings, R: Reader<Offset = usize>> {
-    dwarf: &'data Dwarf<R>,
+    dwarf: &'data DwarfResolver<'data, R>,
     unit: &'data Unit<R>,
     function_range: AddressRange,
-    file_indices: &'data HashMap<u64, FileIndex>,
+    file_indices: &'data FileIndices,
     include_inlines: bool,
     include_call_sites: bool,
     warnings: &'warnings mut Vec<ConversionWarning>,
 }
 
 pub(super) fn extract_subprogram_details<R: Reader<Offset = usize>>(
-    dwarf: &Dwarf<R>,
+    dwarf: &DwarfResolver<'_, R>,
     unit: &Unit<R>,
     offset: gimli::UnitOffset<usize>,
     function_range: AddressRange,
     function_name: &[u8],
-    file_indices: &HashMap<u64, FileIndex>,
+    file_indices: &FileIndices,
     options: &mut DetailOptions<'_>,
 ) -> Result<(Option<InlineNode>, Vec<CallSite>, usize)> {
     if !options.include_inlines && !options.include_call_sites {
@@ -156,6 +157,9 @@ fn finish_inline(stack: &mut Vec<InlineFrame>, roots: &mut Vec<InlineNode>) {
     frame.node.name.shrink_to_fit();
     frame.node.children.shrink_to_fit();
     if let Some(parent) = stack.last_mut() {
+        if parent.node.children.is_empty() {
+            parent.node.children.reserve_exact(1);
+        }
         parent.node.children.push(frame.node);
     } else {
         roots.push(frame.node);
@@ -178,18 +182,20 @@ fn finish_call_sites(
 }
 
 fn make_inline_node<R: Reader<Offset = usize>>(
-    dwarf: &Dwarf<R>,
+    dwarf: &DwarfResolver<'_, R>,
     unit: &Unit<R>,
     entry: &DebuggingInformationEntry<R>,
     parent_ranges: &[AddressRange],
-    file_indices: &HashMap<u64, FileIndex>,
+    file_indices: &FileIndices,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Result<Option<InlineNode>> {
     let Some(name) = resolve_name(dwarf, unit, entry, 0)? else {
         return Ok(None);
     };
-    let mut ranges = dwarf.die_ranges(unit, entry).map_err(gimli_error)?;
-    let mut valid_ranges = Vec::new();
+    let mut ranges = dwarf.dwarf.die_ranges(unit, entry).map_err(gimli_error)?;
+    // Most inline instances have one range. Avoid growing to four entries and
+    // reallocating again when finish_inline shrinks the vector.
+    let mut valid_ranges = Vec::with_capacity(1);
     while let Some(range) = ranges.next().map_err(gimli_error)? {
         let candidate = AddressRange::new(range.begin, range.end);
         if range.begin < range.end
@@ -206,7 +212,7 @@ fn make_inline_node<R: Reader<Offset = usize>>(
     }
     let call_file = match file_index_attribute(entry, gimli::constants::DW_AT_call_file) {
         Some(dwarf_index) => {
-            if let Some(index) = file_indices.get(&dwarf_index).copied() {
+            if let Some(index) = file_indices.get(dwarf_index) {
                 index
             } else {
                 warnings.push(ConversionWarning::MissingInlineCallFile {
@@ -250,7 +256,7 @@ fn coalesce_ranges(ranges: &mut Vec<AddressRange>) {
 }
 
 fn make_call_site<R: Reader<Offset = usize>>(
-    dwarf: &Dwarf<R>,
+    dwarf: &DwarfResolver<'_, R>,
     unit: &Unit<R>,
     entry: &DebuggingInformationEntry<R>,
     function_range: AddressRange,
@@ -259,6 +265,7 @@ fn make_call_site<R: Reader<Offset = usize>>(
         return Ok(None);
     };
     let Some(return_pc) = dwarf
+        .dwarf
         .attr_address(unit, return_pc_value)
         .map_err(gimli_error)?
     else {
@@ -272,7 +279,7 @@ fn make_call_site<R: Reader<Offset = usize>>(
     };
     let mut patterns = Vec::new();
     if let Some(origin) = entry.attr_value(gimli::constants::DW_AT_call_origin) {
-        let mut visited = HashSet::new();
+        let mut visited = VisitedDies::default();
         if let Some(name) = resolve_reference_name(dwarf, unit, &origin, 0, &mut visited)? {
             patterns.push(name);
         }
@@ -395,12 +402,12 @@ mod tests {
         let subprogram_offset = entries.next_dfs().unwrap().unwrap().offset();
         let mut warnings = Vec::new();
         let (inline, call_sites, count) = extract_subprogram_details(
-            &dwarf,
+            &DwarfResolver::new(&dwarf),
             &unit,
             subprogram_offset,
             AddressRange::new(0x1000, 0x1100),
             b"root",
-            &HashMap::new(),
+            &FileIndices::default(),
             &mut DetailOptions {
                 include_inlines: true,
                 include_call_sites: false,
@@ -409,7 +416,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(call_sites.is_empty());
+        assert_eq!(call_sites.len(), 0);
         assert_eq!(count, 1);
         let root = inline.unwrap();
         let [child] = root.children.as_slice() else {

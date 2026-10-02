@@ -60,7 +60,7 @@ pub(crate) fn corrupt_build_id(bytes: &mut [u8]) {
         .unwrap()
         .expect("test binaries are linked with a build ID")
         .to_vec();
-    assert!(!build_id.is_empty());
+    assert_ne!(build_id.len(), 0);
     let position = bytes
         .windows(build_id.len())
         .position(|window| window == build_id)

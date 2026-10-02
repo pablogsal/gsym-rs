@@ -1,8 +1,8 @@
 //! Decoding a whole image and re-encoding it, as one file or as segments.
 
 use gsym::{
-    AddressRange, Endian, FileEntry, Function, Gsym, GsymBuilder, GsymVersion, InlineNode,
-    LineEntry, TranscodeOptions,
+    AddressRange, DecodedGsym, Endian, FileEntry, Function, Gsym, GsymBuilder, GsymVersion,
+    InlineNode, LineEntry, TranscodeOptions,
 };
 
 use crate::bytes::ByteOrder;
@@ -113,6 +113,56 @@ fn segments_are_independent_size_bounded_and_cover_every_function() {
 fn zero_segment_size_is_rejected() {
     let decoded = Gsym::parse(&source_image()).unwrap().decode_all().unwrap();
     assert!(decoded.segments(0, TranscodeOptions::default()).is_err());
+}
+
+#[test]
+fn uneven_segments_keep_the_largest_prefix_that_fits() {
+    let mut builder = GsymBuilder::new();
+    for index in 0..128_u64 {
+        let start = 0x1000 + index * 64;
+        let padding = if index % 17 == 0 {
+            4096
+        } else {
+            usize::try_from(index % 31).unwrap()
+        };
+        builder
+            .add_function(Function::new(
+                AddressRange::new(start, start + 48),
+                format!("function_{index}_{}", "x".repeat(padding)),
+            ))
+            .unwrap();
+    }
+    let model = Gsym::parse(builder.to_bytes().unwrap())
+        .unwrap()
+        .decode_all()
+        .unwrap();
+    for version in [GsymVersion::V1, GsymVersion::V2] {
+        for target in [1, 256, 4096, 10_000, usize::MAX] {
+            let options = TranscodeOptions {
+                version: Some(version),
+                endian: Some(Endian::Big),
+            };
+            let segments = model.segments(target, options).unwrap();
+            let mut start = 0;
+            for segment in &segments {
+                assert!(segment.function_count == 1 || segment.bytes().len() <= target);
+                let end = start + segment.function_count;
+                if end < model.functions.len() {
+                    let extended = DecodedGsym {
+                        source_version: model.source_version,
+                        source_endian: model.source_endian,
+                        base_address: model.base_address,
+                        build_id: model.build_id.clone(),
+                        files: model.files.clone(),
+                        functions: model.functions[start..=end].to_vec(),
+                    };
+                    assert!(extended.transcode(options).unwrap().len() > target);
+                }
+                start = end;
+            }
+            assert_eq!(start, model.functions.len());
+        }
+    }
 }
 
 #[test]

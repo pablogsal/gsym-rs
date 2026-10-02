@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use gimli::{
-    AttributeValue, DebuggingInformationEntry, Dwarf, DwarfPackageSections, DwarfSections,
-    EndianSlice, Reader, RelocateReader, RunTimeEndian, Unit,
+    AbbreviationsCacheStrategy, AttributeValue, DebuggingInformationEntry, Dwarf,
+    DwarfPackageSections, DwarfSections, EndianSlice, Reader, RelocateReader, RunTimeEndian, Unit,
 };
 use object::Object;
 
@@ -18,7 +17,9 @@ use lines::{LineSequenceRange, SequencedLine, scan_line_sequence_offsets};
 use lines::{UnitLines, collect_lines, statement_sequence_offset};
 #[cfg(test)]
 use object::{RelocationEncoding, RelocationKind};
-use references::{absolute_entry_offset, attribute_bytes, resolve_declaration_line, resolve_name};
+use references::{
+    DwarfResolver, absolute_entry_offset, attribute_bytes, resolve_declaration_line, resolve_name,
+};
 use sections::{
     DwarfRelocations, SectionData, load_dwo_section, load_dwo_section_owned, load_section,
 };
@@ -29,7 +30,7 @@ use super::ConversionWarning;
 use super::elf::{AddressLayout, ConversionStats};
 #[cfg(test)]
 use crate::model::LineEntry;
-use crate::model::{AddressRange, FileIndex, Function};
+use crate::model::{AddressRange, Function};
 use crate::{ElfInputKind, Error, GsymBuilder, Result};
 
 const DW_AT_LLVM_STMT_SEQUENCE: gimli::DwAt = gimli::DwAt(0x3e0c);
@@ -43,6 +44,22 @@ fn runtime_endian(file: &object::File<'_>) -> RunTimeEndian {
     } else {
         RunTimeEndian::Big
     }
+}
+
+fn borrow_dwarf<'a>(
+    sections: &'a DwarfSections<SectionData<'_>>,
+    endian: RunTimeEndian,
+) -> Dwarf<SectionReader<'a, 'a>> {
+    let mut dwarf = sections.borrow(|section| {
+        RelocateReader::new(
+            EndianSlice::new(section.data.as_ref(), endian),
+            &section.relocations,
+        )
+    });
+    // References can revisit even a unit with its own abbreviation table.
+    // Gimli's cache lookups do not populate the cache on a miss.
+    dwarf.populate_abbreviations_cache(AbbreviationsCacheStrategy::All);
+    dwarf
 }
 
 fn unsigned_attribute<R: Reader<Offset = usize>>(
@@ -117,12 +134,10 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
     let supplementary_sections = supplementary
         .map(|file| DwarfSections::load(|id| load_section(file, id, layout)))
         .transpose()?;
-    let dwarf = sections.borrow_with_sup(supplementary_sections.as_ref(), |section| {
-        RelocateReader::new(
-            EndianSlice::new(section.data.as_ref(), endian),
-            &section.relocations,
-        )
-    });
+    let mut dwarf = borrow_dwarf(&sections, endian);
+    if let Some(sections) = &supplementary_sections {
+        dwarf.set_sup(borrow_dwarf(sections, endian));
+    }
     let package_endian = dwp.map(runtime_endian);
     let package_sections = dwp
         .map(|file| DwarfPackageSections::load(|id| load_dwo_section(file, id, layout)))
@@ -176,7 +191,8 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
             }
             if let Some(package) = &dwp_package {
                 match package.find_cu(dwo_id, &dwarf).map_err(gimli_error) {
-                    Ok(Some(dwo)) => {
+                    Ok(Some(mut dwo)) => {
+                        dwo.populate_abbreviations_cache(AbbreviationsCacheStrategy::All);
                         let split_unit = find_split_unit(&dwo, dwo_id)?;
                         import_split_unit_for_skeleton(
                             &dwo,
@@ -229,12 +245,7 @@ fn try_import_loose_dwo<'data, 'relocations>(
         Ok(None) => return Ok(LooseDwoImport::Unavailable),
         Err(error) => return Ok(LooseDwoImport::Failed(format!("DWO: {error}").into())),
     };
-    let mut dwo = sections.borrow(|section| {
-        RelocateReader::new(
-            EndianSlice::new(section.data.as_ref(), endian),
-            &section.relocations,
-        )
-    });
+    let mut dwo = borrow_dwarf(&sections, endian);
     dwo.make_dwo(parent);
     let split_unit = match find_split_unit(&dwo, dwo_id) {
         Ok(unit) => unit,
@@ -318,15 +329,14 @@ fn import_unit_details<R: Reader<Offset = usize>>(
     dwarf: &Dwarf<R>,
     unit: &Unit<R>,
     executable_lines: &UnitLines,
-    file_indices: &HashMap<u64, FileIndex>,
+    file_indices: &lines::FileIndices,
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
-    let mut entries = unit.entries();
-    while let Some(entry) = entries.next_dfs().map_err(gimli_error)? {
-        if entry.tag() != gimli::constants::DW_TAG_subprogram {
-            continue;
-        }
-        let Some(name) = resolve_name(dwarf, unit, entry, 0)? else {
+    let resolver = DwarfResolver::new(dwarf);
+    let mut entries = unit.entries_raw(None).map_err(gimli_error)?;
+    let mut entry = DebuggingInformationEntry::null();
+    while let Some(entry) = next_subprogram(&mut entries, &mut entry).map_err(gimli_error)? {
+        let Some(name) = resolve_name(&resolver, unit, entry, 0)? else {
             continue;
         };
         let mut ranges = match dwarf.die_ranges(unit, entry) {
@@ -390,7 +400,7 @@ fn import_unit_details<R: Reader<Offset = usize>>(
             }
             if function_lines.is_empty()
                 && let Some(mut declaration) = resolve_declaration_line(
-                    dwarf,
+                    &resolver,
                     unit,
                     entry,
                     file_indices,
@@ -403,7 +413,7 @@ fn import_unit_details<R: Reader<Offset = usize>>(
             }
             context.stats.line_rows = context.stats.line_rows.saturating_add(function_lines.len());
             let (inline, call_sites, inline_count) = extract_subprogram_details(
-                dwarf,
+                &resolver,
                 unit,
                 entry.offset(),
                 AddressRange::new(range.begin, range.end),
@@ -428,6 +438,28 @@ fn import_unit_details<R: Reader<Offset = usize>>(
         }
     }
     Ok(())
+}
+
+fn next_subprogram<'entry, R: Reader>(
+    entries: &mut gimli::EntriesRaw<'_, R>,
+    entry: &'entry mut DebuggingInformationEntry<R>,
+) -> gimli::Result<Option<&'entry DebuggingInformationEntry<R>>> {
+    while !entries.is_empty() {
+        let mut probe = entries.clone();
+        if let Some(abbreviation) = probe.read_abbreviation()? {
+            if abbreviation.tag() == gimli::DW_TAG_subprogram {
+                entries.read_entry(entry)?;
+                return Ok(Some(entry));
+            }
+            // Parse unused attributes to preserve errors, but avoid building
+            // an attribute vector for entries the importer does not consume.
+            for specification in abbreviation.attributes() {
+                drop(probe.read_attribute_inline(*specification)?);
+            }
+        }
+        *entries = probe;
+    }
+    Ok(None)
 }
 
 fn load_dwo<R: Reader<Offset = usize>>(
@@ -551,9 +583,87 @@ fn is_live_range(range: AddressRange, executable_ranges: &[AddressRange]) -> boo
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::borrow::Cow;
+    use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn subprogram_scan_preserves_entries_and_attribute_errors() {
+        for form in [
+            0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+        ] {
+            let abbrev = [1, 0x34, 1, 3, form, 0, 0, 2, 0x2e, 0, 3, 8, 0, 0, 0];
+            let abbrev = gimli::DebugAbbrev::new(&abbrev, gimli::LittleEndian)
+                .abbreviations(gimli::DebugAbbrevOffset(0))
+                .unwrap();
+            for length in 0..=24 {
+                for value in [0, 1, 0x80, 0xff] {
+                    let mut body = vec![1];
+                    body.extend(std::iter::repeat_n(value, length));
+                    body.extend_from_slice(&[0, 2, b'f', 0, 0]);
+                    let mut data = u32::try_from(body.len() + 7)
+                        .unwrap()
+                        .to_le_bytes()
+                        .to_vec();
+                    data.extend_from_slice(&[4, 0, 0, 0, 0, 0, 8]);
+                    data.extend(body);
+                    let info = gimli::DebugInfo::new(&data, gimli::LittleEndian);
+                    let header = info.units().next().unwrap().unwrap();
+                    let mut original = header.entries(&abbrev);
+                    let mut raw = header.entries_raw(&abbrev, None).unwrap();
+                    let mut entry = DebuggingInformationEntry::null();
+                    assert_subprogram_scan_matches(&mut original, &mut raw, &mut entry);
+                }
+            }
+        }
+    }
+
+    fn assert_subprogram_scan_matches<R: Reader>(
+        original: &mut gimli::EntriesCursor<'_, R>,
+        raw: &mut gimli::EntriesRaw<'_, R>,
+        entry: &mut DebuggingInformationEntry<R>,
+    ) {
+        loop {
+            let expected = loop {
+                match original.next_dfs() {
+                    Ok(Some(entry)) if entry.tag() != gimli::DW_TAG_subprogram => {}
+                    outcome => break outcome.map(|entry| entry.map(|entry| format!("{entry:?}"))),
+                }
+            };
+            let actual =
+                next_subprogram(raw, entry).map(|entry| entry.map(|entry| format!("{entry:?}")));
+            assert_eq!(actual, expected);
+            if !matches!(actual, Ok(Some(_))) {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn abbreviations_are_reused_even_when_only_one_unit_uses_the_table() {
+        let sections = DwarfSections::load(|id| -> gimli::Result<_> {
+            let data: &[u8] = if id == gimli::SectionId::DebugInfo {
+                // DWARF 4 unit header followed by a compile-unit DIE.
+                &[8, 0, 0, 0, 4, 0, 0, 0, 0, 0, 8, 1]
+            } else if id == gimli::SectionId::DebugAbbrev {
+                &[1, 0x11, 0, 0, 0, 0]
+            } else {
+                &[]
+            };
+            Ok(SectionData {
+                data: Cow::Borrowed(data),
+                ..SectionData::default()
+            })
+        })
+        .unwrap();
+        let dwarf = borrow_dwarf(&sections, RunTimeEndian::Little);
+        let header = dwarf.units().next().unwrap().unwrap();
+        let first = dwarf.unit(header.clone()).unwrap();
+        let second = dwarf.unit(header).unwrap();
+        assert!(Arc::ptr_eq(&first.abbreviations, &second.abbreviations));
+    }
 
     #[test]
     fn dead_and_invalid_ranges_are_rejected_without_losing_live_ranges() {
@@ -669,7 +779,7 @@ mod tests {
                     statement_sequence: Some(0x40),
                 },
             ],
-            files: HashMap::new(),
+            files: lines::FileIndices::default(),
             sequences: vec![
                 LineSequenceRange {
                     range: AddressRange::new(0x1000, 0x1100),
@@ -689,11 +799,12 @@ mod tests {
         assert_eq!(first.address, 0x1010);
         assert_eq!(first.line, 10);
         assert_eq!(second.address, 0x1020);
-        assert!(
+        assert_eq!(
             lines
                 .for_range(AddressRange::new(0x1800, 0x1810), None)
                 .0
-                .is_empty()
+                .len(),
+            0
         );
     }
 
@@ -718,7 +829,7 @@ mod tests {
                     statement_sequence: Some(0x40),
                 },
             ],
-            files: HashMap::new(),
+            files: lines::FileIndices::default(),
             sequences: vec![
                 LineSequenceRange {
                     range: AddressRange::new(0x1000, 0x1100),
@@ -761,7 +872,7 @@ mod tests {
                 row(0x1008, 2, 10),
                 row(0x100c, 2, 10),
             ],
-            files: HashMap::new(),
+            files: lines::FileIndices::default(),
             sequences: vec![LineSequenceRange {
                 range: AddressRange::new(0x1000, 0x1010),
                 statement_sequence: Some(0x29),

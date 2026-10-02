@@ -19,66 +19,85 @@ pub(super) fn finalize(
 }
 
 fn sort_by_ordering_key(mut functions: Vec<Function>) -> Vec<Function> {
-    let mut keyed: Vec<_> = functions
+    let mut order: Vec<_> = functions
         .iter()
         .enumerate()
-        .map(|(index, function)| {
-            (
-                function.range,
-                richness(function),
-                function.name.as_slice(),
-                semantic_tiebreak(function),
-                index,
-            )
-        })
+        .map(|(index, function)| (function.range, index))
         .collect();
-    keyed.sort_unstable();
-    let mut order: Vec<usize> = keyed.into_iter().map(|entry| entry.4).collect();
+    order.sort_unstable();
+    {
+        // Tree richness and names only affect functions with equal ranges.
+        // Reuse this scratch allocation across alias groups.
+        let mut aliases = Vec::new();
+        for group in order.chunk_by_mut(|left, right| left.0 == right.0) {
+            if group.len() < 2 {
+                continue;
+            }
+            let compare_inlines = group
+                .iter()
+                .filter(|(_, index)| {
+                    functions
+                        .get(*index)
+                        .is_some_and(|function| function.inline.is_some())
+                })
+                .take(2)
+                .count()
+                == 2;
+            aliases.clear();
+            aliases.extend(group.iter().filter_map(|(_, index)| {
+                let function = functions.get(*index)?;
+                Some((
+                    richness(function, compare_inlines),
+                    function.name.as_slice(),
+                    semantic_tiebreak(function),
+                    *index,
+                ))
+            }));
+            aliases.sort_unstable();
+            for (slot, key) in group.iter_mut().zip(&aliases) {
+                slot.1 = key.3;
+            }
+        }
+    }
     for start in 0..order.len() {
         let mut current = start;
         while let Some(source) = order
             .get(current)
-            .copied()
+            .map(|entry| entry.1)
             .filter(|source| *source != start)
         {
             functions.swap(current, source);
             if let Some(slot) = order.get_mut(current) {
-                *slot = current;
+                slot.1 = current;
             }
             current = source;
         }
         if let Some(slot) = order.get_mut(current) {
-            *slot = current;
+            slot.1 = current;
         }
     }
     functions
 }
 
-fn merge_equal_ranges(functions: Vec<Function>) -> Vec<Function> {
-    let mut merged: Vec<Function> = Vec::with_capacity(functions.len());
-    for function in functions {
-        if let Some(parent) = merged.last_mut()
-            && parent.range == function.range
-        {
-            let previous = parent.merged.last().unwrap_or(&*parent);
-            if *previous != function {
-                parent.merged.push(function);
-            }
-        } else {
-            merged.push(function);
+fn merge_equal_ranges(mut functions: Vec<Function>) -> Vec<Function> {
+    functions.dedup_by(|function, parent| {
+        if parent.range != function.range {
+            return false;
         }
-    }
-    merged
+        let previous = parent.merged.last().unwrap_or(&*parent);
+        if *previous != *function {
+            parent.merged.push(std::mem::take(function));
+        }
+        true
+    });
+    functions
 }
 
-fn deduplicate(functions: Vec<Function>) -> Vec<Function> {
-    let mut deduplicated: Vec<Function> = Vec::with_capacity(functions.len());
-    for mut function in functions {
-        if let Some(previous) = deduplicated.last_mut()
-            && previous.range == function.range
-        {
+fn deduplicate(mut functions: Vec<Function>) -> Vec<Function> {
+    functions.dedup_by(|function, previous| {
+        if previous.range == function.range {
             let previous_rich = has_rich_info(previous);
-            let current_rich = has_rich_info(&function);
+            let current_rich = has_rich_info(function);
             if previous_rich != current_rich {
                 if !previous_rich
                     && should_replace_with_mangled_name(&previous.name, &function.name)
@@ -86,23 +105,20 @@ fn deduplicate(functions: Vec<Function>) -> Vec<Function> {
                     function.name.clone_from(&previous.name);
                 }
                 if current_rich {
-                    *previous = function;
+                    std::mem::swap(previous, function);
                 }
-            } else if *previous != function {
-                *previous = function;
+            } else if *previous != *function {
+                std::mem::swap(previous, function);
             }
-            continue;
+            true
+        } else if previous.range.is_empty() && function.range.contains(previous.range.start) {
+            std::mem::swap(previous, function);
+            true
+        } else {
+            false
         }
-        if let Some(previous) = deduplicated.last_mut()
-            && previous.range.is_empty()
-            && function.range.contains(previous.range.start)
-        {
-            *previous = function;
-            continue;
-        }
-        deduplicated.push(function);
-    }
-    deduplicated
+    });
+    functions
 }
 
 fn repair_final_range(mut functions: Vec<Function>, options: &BuilderOptions) -> Vec<Function> {
@@ -159,8 +175,14 @@ type Richness = (bool, usize, usize, usize, usize, usize, usize);
 
 type Tiebreak = (usize, usize);
 
-fn richness(function: &Function) -> Richness {
-    let inline = function.inline.as_ref().map_or((0, 0, 0), inline_quality);
+fn richness(function: &Function, compare_inlines: bool) -> Richness {
+    // A single inline tree already wins on inline presence, before its size or
+    // depth can affect ordering. Avoid traversing that tree just for ranking.
+    let inline = if compare_inlines {
+        function.inline.as_ref().map_or((0, 0, 0), inline_quality)
+    } else {
+        (0, 0, 0)
+    };
     (
         function.inline.is_some(),
         inline.0,
@@ -218,4 +240,43 @@ fn semantic_tiebreak(function: &Function) -> Tiebreak {
         .as_ref()
         .map_or(0, |node| node.children.len());
     (inline_children, function.name.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::LineEntry;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn deferred_ranking_matches_the_complete_stable_key(
+            records in prop::collection::vec((0_u8..12, 0_u8..8, 0_u8..6, 0_u8..8), 0..100),
+        ) {
+            let functions: Vec<_> = records.into_iter().map(|(address, name, children, rows)| {
+                let range = AddressRange::new(u64::from(address).saturating_mul(16), u64::from(address).saturating_mul(16).saturating_add(8));
+                let inline = (children > 0).then(|| InlineNode {
+                    ranges: vec![range],
+                    children: (0..children).map(|_| InlineNode {
+                        ranges: vec![range],
+                        ..InlineNode::default()
+                    }).collect(),
+                    ..InlineNode::default()
+                });
+                Function {
+                    inline,
+                    lines: (0..rows).map(|line| LineEntry::new(range.start, 0.into(), u32::from(line))).collect(),
+                    ..Function::new(range, vec![name])
+                }
+            }).collect();
+            let mut expected = functions.clone();
+            expected.sort_by_cached_key(|function| (
+                function.range,
+                richness(function, true),
+                function.name.clone(),
+                semantic_tiebreak(function),
+            ));
+            prop_assert_eq!(sort_by_ordering_key(functions), expected);
+        }
+    }
 }

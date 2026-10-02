@@ -32,7 +32,7 @@ fn converts_the_linked_test_image_from_symbols() {
     let report = converter.convert(ElfInputs::new(executable)).unwrap();
 
     assert!(report.stats.symbol_functions > 0);
-    assert!(!report.builder.functions().is_empty());
+    assert_ne!(report.builder.functions().len(), 0);
     let bytes = report.builder.to_bytes().unwrap();
     let gsym = Gsym::parse(&bytes).unwrap();
     gsym.verify().unwrap();

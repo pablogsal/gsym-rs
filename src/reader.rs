@@ -455,7 +455,7 @@ impl<D: AsRef<[u8]>> Gsym<D> {
     pub(crate) fn decode_all_verified(&self) -> Result<(VerifyReport, Vec<crate::Function>)> {
         let mut functions = Vec::with_capacity(self.layout.address_count as usize);
         let report = self.verify_with(|reference, encoded| {
-            functions.push(owned::decode(reference, encoded)?);
+            functions.push(owned::decode_validated(reference, encoded)?);
             Ok(())
         })?;
         Ok((report, functions))
@@ -482,6 +482,10 @@ impl<D: AsRef<[u8]>> Gsym<D> {
                 return Err(Error::InvalidFormat("file-table index zero must be empty"));
             }
         }
+        let mut verified_files = vec![false; self.layout.file_count as usize];
+        if let Some(first) = verified_files.first_mut() {
+            *first = true;
+        }
         let mut previous = None;
         for index in 0..self.layout.address_count as usize {
             let address = self.address(index)?;
@@ -491,24 +495,25 @@ impl<D: AsRef<[u8]>> Gsym<D> {
             previous = Some(address);
             let function = self.function(index)?;
             let decoded = function.decode_encoded()?;
-            owned::validate(&function, &decoded)?;
+            owned::validate(&function, &decoded, &mut verified_files)?;
             visitor(&function, decoded)?;
         }
-        for index in 0..self.layout.file_count {
-            let _ = self.file(index)?;
+        for (index, verified) in (0..self.layout.file_count).zip(verified_files) {
+            if !verified {
+                let _ = self.file(index)?;
+            }
         }
         Ok(VerifyReport {
             functions: self.layout.address_count as usize,
             files: self.layout.file_count as usize,
-            strings: self
-                .data
-                .as_ref()
-                .get(self.layout.string_table.clone())
-                .unwrap_or_default()
-                .iter()
-                .fold(0_usize, |total, byte| {
-                    total.saturating_add(usize::from(*byte == 0))
-                }),
+            strings: memchr::memchr_iter(
+                0,
+                self.data
+                    .as_ref()
+                    .get(self.layout.string_table.clone())
+                    .unwrap_or_default(),
+            )
+            .count(),
             function_info_bytes: self.layout.function_info.len(),
         })
     }

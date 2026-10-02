@@ -626,7 +626,7 @@ pub(crate) fn verify_file(file: &File, build_id: &BuildId, path: &Path) -> Resul
     let invalid_gsym = |source| Error::InvalidGsym(Box::new(InvalidGsymError::new(path, source)));
     // SAFETY: population exposes only a Write facade, publish consumes it, and
     // cache entries are immutable after publication.
-    let gsym = unsafe { gsym::MappedGsym::map_file(file) }.map_err(&invalid_gsym)?;
+    let gsym = unsafe { gsym::MappedGsym::map_file(file) }.map_err(invalid_gsym)?;
     let actual = gsym.build_id();
     if actual != build_id.as_bytes() {
         return Err(Error::BuildIdMismatch(Box::new(BuildIdMismatchError::new(

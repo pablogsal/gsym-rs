@@ -22,9 +22,40 @@ pub(super) struct LineSequenceRange {
     pub(super) statement_sequence: Option<u64>,
 }
 
+#[derive(Default)]
+pub(super) struct FileIndices {
+    dense: Vec<Option<FileIndex>>,
+    // On 32-bit targets Gimli can accept a u64 index after truncating it to
+    // usize. Preserve the mapping under the original index when that happens.
+    overflow: HashMap<u64, FileIndex>,
+}
+
+impl FileIndices {
+    pub(super) fn is_empty(&self) -> bool {
+        self.dense.iter().all(Option::is_none) && self.overflow.is_empty()
+    }
+
+    pub(super) fn get(&self, index: u64) -> Option<FileIndex> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.dense.get(index).copied().flatten())
+            .or_else(|| self.overflow.get(&index).copied())
+    }
+
+    fn insert(&mut self, index: u64, file: FileIndex) {
+        if let Ok(index) = usize::try_from(index)
+            && let Some(slot) = self.dense.get_mut(index)
+        {
+            *slot = Some(file);
+        } else {
+            self.overflow.insert(index, file);
+        }
+    }
+}
+
 pub(super) struct UnitLines {
     pub(super) entries: Vec<SequencedLine>,
-    pub(super) files: HashMap<u64, FileIndex>,
+    pub(super) files: FileIndices,
     pub(super) sequences: Vec<LineSequenceRange>,
 }
 
@@ -40,12 +71,6 @@ impl UnitLines {
                 .any(|sequence| sequence.statement_sequence == Some(requested))
         });
         let selected_sequence = requested_sequence.filter(|_| sequence_exists);
-        let clamping_sequence = selected_sequence.or_else(|| {
-            self.sequences
-                .iter()
-                .find(|sequence| sequence.range.contains(range.start))
-                .and_then(|sequence| sequence.statement_sequence)
-        });
 
         let start = self
             .entries
@@ -64,11 +89,15 @@ impl UnitLines {
             .map(|line| line.entry)
             .collect::<Vec<_>>();
 
-        if self.sequences.iter().any(|sequence| {
-            selected_sequence.is_none_or(|selected| sequence.statement_sequence == Some(selected))
-                && sequence.range.contains(range.start)
-        }) && output.first().is_none_or(|line| line.address > range.start)
-            && let Some(previous) = self
+        if output.first().is_none_or(|line| line.address > range.start)
+            && let Some(sequence) = self.sequences.iter().find(|sequence| {
+                selected_sequence
+                    .is_none_or(|selected| sequence.statement_sequence == Some(selected))
+                    && sequence.range.contains(range.start)
+            })
+        {
+            let clamping_sequence = selected_sequence.or(sequence.statement_sequence);
+            if let Some(previous) = self
                 .entries
                 .get(..start)
                 .unwrap_or_default()
@@ -78,10 +107,11 @@ impl UnitLines {
                     clamping_sequence
                         .is_none_or(|selected| line.statement_sequence == Some(selected))
                 })
-        {
-            let mut clamped = previous.entry;
-            clamped.address = range.start;
-            output.insert(0, clamped);
+            {
+                let mut clamped = previous.entry;
+                clamped.address = range.start;
+                output.insert(0, clamped);
+            }
         }
         compact_line_rows(&mut output);
         let invalid_sequence =
@@ -116,76 +146,92 @@ pub(super) fn collect_lines<R: Reader<Offset = usize>>(
     } else {
         return Ok(UnitLines {
             entries: Vec::new(),
-            files: HashMap::new(),
+            files: FileIndices::default(),
             sequences: Vec::new(),
         });
     };
-    let (program, sequences) = line_program.sequences().map_err(gimli_error)?;
-    let header = program.header();
-    let statement_sequence_offsets = line_sequence_offsets(header)?;
-    if statement_sequence_offsets.len() != sequences.len() {
+    let statement_sequence_offsets = line_sequence_offsets(line_program.header());
+    let mut rows = line_program.rows();
+    let mut raw_lines = Vec::new();
+    let mut sequence_ranges = Vec::new();
+    let mut sequence_start = None;
+    let mut sequence_count = 0_usize;
+    let mut completed_rows = 0;
+    while let Some((_, row)) = rows.next_row().map_err(gimli_error)? {
+        let statement_sequence = statement_sequence_offsets
+            .as_ref()
+            .ok()
+            .and_then(|offsets| offsets.get(sequence_count).copied());
+        if row.end_sequence() {
+            let start = sequence_start.take().unwrap_or(0);
+            if start < row.address() {
+                sequence_ranges.push(LineSequenceRange {
+                    range: AddressRange::new(start, row.address()),
+                    statement_sequence,
+                });
+            }
+            sequence_count = sequence_count.saturating_add(1);
+            completed_rows = raw_lines.len();
+        } else {
+            sequence_start.get_or_insert_with(|| row.address());
+            raw_lines.push((
+                row.address(),
+                row.file_index(),
+                row.line().map_or(0, std::num::NonZeroU64::get),
+                sequence_count,
+            ));
+        }
+    }
+    // Preserve Gimli's error precedence over the sequence-offset scanner.
+    let statement_sequence_offsets = statement_sequence_offsets?;
+    // Match Gimli's completed-sequence handling and use the final file table:
+    // DW_LNE_define_file can add entries while the program runs.
+    raw_lines.truncate(completed_rows);
+    let header = rows.header();
+    if statement_sequence_offsets.len() != sequence_count {
         warnings.push(ConversionWarning::LineSequenceMismatch {
-            sequences: sequences.len(),
+            sequences: sequence_count,
             offsets: statement_sequence_offsets.len(),
         });
     }
     let mut files = intern_header_files(dwarf, unit, header, builder)?;
-    let mut output = Vec::new();
-    let mut sequence_ranges = Vec::new();
-    for (index, sequence) in sequences.into_iter().enumerate() {
-        let statement_sequence = statement_sequence_offsets.get(index).copied();
-        if sequence.start < sequence.end {
-            sequence_ranges.push(LineSequenceRange {
-                range: AddressRange::new(sequence.start, sequence.end),
-                statement_sequence,
-            });
-        }
-        let mut rows = program.resume_from(&sequence);
-        while let Some((header, row)) = rows.next_row().map_err(gimli_error)? {
-            if row.end_sequence() {
-                continue;
-            }
-            let dwarf_index = row.file_index();
-            let file = if let Some(file) = files.get(&dwarf_index).copied() {
+    // Keep the raw and converted rows the same size so collect can reuse the
+    // allocation while resolving file indices and filtering invalid rows.
+    let mut output = raw_lines
+        .into_iter()
+        .filter_map(|(address, dwarf_index, line, sequence_index)| {
+            let file = if let Some(file) = files.get(dwarf_index) {
                 file
             } else {
-                let Some(entry) = row.file(header) else {
+                let Some(entry) = header.file(dwarf_index) else {
                     warnings.push(ConversionWarning::MissingLineFile {
-                        address: row.address(),
+                        address,
                         index: dwarf_index,
                     });
-                    continue;
+                    return None;
                 };
-                let Some(file) = intern_file(dwarf, unit, header, entry, builder)? else {
-                    continue;
+                let file = match intern_file(dwarf, unit, header, entry, builder) {
+                    Ok(Some(file)) => file,
+                    Ok(None) => return None,
+                    Err(error) => return Some(Err(error)),
                 };
                 files.insert(dwarf_index, file);
                 file
             };
-            let line = match row.line() {
-                None => 0,
-                Some(line) => {
-                    if let Ok(line) = u32::try_from(line.get()) {
-                        line
-                    } else {
-                        warnings.push(ConversionWarning::UnrepresentableLine {
-                            address: row.address(),
-                            line: line.get(),
-                        });
-                        continue;
-                    }
-                }
+            let Ok(line) = u32::try_from(line) else {
+                warnings.push(ConversionWarning::UnrepresentableLine { address, line });
+                return None;
             };
-            output.push(SequencedLine {
+            Some(Ok(SequencedLine {
                 entry: LineEntry {
-                    address: row.address(),
+                    address,
                     file,
                     line,
                 },
-                statement_sequence,
-            });
-        }
-    }
+                statement_sequence: statement_sequence_offsets.get(sequence_index).copied(),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
     output.sort_by_key(|row| row.entry.address);
     output.dedup();
     Ok(UnitLines {
@@ -352,18 +398,18 @@ pub(super) fn intern_header_files<R: Reader<Offset = usize>>(
     unit: &gimli::Unit<R>,
     header: &gimli::LineProgramHeader<R>,
     builder: &mut GsymBuilder,
-) -> Result<HashMap<u64, FileIndex>> {
-    let first_file_index = u64::from(header.version() <= 4);
-    let mut files = HashMap::with_capacity(header.file_names().len());
-    for (offset, file) in header.file_names().iter().enumerate() {
-        let dwarf_index = first_file_index
-            .checked_add(
-                u64::try_from(offset).map_err(|_| Error::Overflow("DWARF file-table index"))?,
-            )
-            .ok_or(Error::Overflow("DWARF file-table index"))?;
-        if let Some(gsym_index) = intern_file(dwarf, unit, header, file, builder)? {
-            files.insert(dwarf_index, gsym_index);
-        }
+) -> Result<FileIndices> {
+    let mut files = FileIndices {
+        dense: Vec::with_capacity(header.file_names().len().saturating_add(1)),
+        ..FileIndices::default()
+    };
+    if header.version() <= 4 {
+        files.dense.push(None);
+    }
+    for file in header.file_names() {
+        files
+            .dense
+            .push(intern_file(dwarf, unit, header, file, builder)?);
     }
     Ok(files)
 }
@@ -481,7 +527,124 @@ fn split_path(path: &[u8]) -> (&[u8], &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_path, is_absolute_path, split_path};
+    use gimli::{DwarfSections, EndianSlice, LittleEndian, SectionId};
+
+    use super::*;
+
+    #[test]
+    fn dense_file_indices_preserve_holes_and_reject_large_offsets() {
+        let mut files = FileIndices {
+            dense: vec![None, Some(FileIndex::new(7)), None],
+            ..FileIndices::default()
+        };
+        assert!(!files.is_empty());
+        assert_eq!(files.get(0), None);
+        assert_eq!(files.get(1), Some(FileIndex::new(7)));
+        assert_eq!(files.get(2), None);
+        assert_eq!(files.get(u64::MAX), None);
+        files.insert(u64::MAX, FileIndex::new(11));
+        assert_eq!(files.get(u64::MAX), Some(FileIndex::new(11)));
+        files.insert(0, FileIndex::new(9));
+        assert_eq!(files.get(0), Some(FileIndex::new(9)));
+        assert!(
+            FileIndices {
+                dense: vec![None, None],
+                ..FileIndices::default()
+            }
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn line_import_uses_the_complete_file_table_and_discards_unterminated_rows() {
+        let mut instructions = vec![0, 9, gimli::DW_LNE_set_address.0];
+        instructions.extend_from_slice(&0x1000_u64.to_le_bytes());
+        instructions.extend_from_slice(&[
+            gimli::DW_LNS_set_file.0,
+            2,
+            gimli::DW_LNS_copy.0,
+            gimli::DW_LNS_advance_pc.0,
+            16,
+            0,
+            1,
+            gimli::DW_LNE_end_sequence.0,
+            0,
+            1,
+            gimli::DW_LNE_end_sequence.0,
+            0,
+            11,
+            gimli::DW_LNE_define_file.0,
+        ]);
+        instructions.extend_from_slice(b"late.c\0\0\0\0");
+        instructions.extend_from_slice(&[0, 9, gimli::DW_LNE_set_address.0]);
+        instructions.extend_from_slice(&0x2000_u64.to_le_bytes());
+        instructions.push(gimli::DW_LNS_copy.0);
+
+        let sections = line_sections(&instructions);
+        let dwarf = sections.borrow(|data| EndianSlice::new(data, LittleEndian));
+        let unit = dwarf.unit(dwarf.units().next().unwrap().unwrap()).unwrap();
+        let mut builder = GsymBuilder::new();
+        let mut warnings = Vec::new();
+        let lines = collect_lines(&dwarf, &unit, &mut builder, &mut warnings).unwrap();
+        assert_eq!(warnings.len(), 0);
+        assert_eq!(lines.entries.len(), 1);
+        assert_eq!(
+            lines.entries.first().unwrap().entry,
+            LineEntry::new(0x1000, lines.files.get(2).unwrap(), 1)
+        );
+        assert_eq!(lines.sequences.len(), 1);
+        assert_eq!(
+            lines.sequences.first().unwrap().range,
+            AddressRange::new(0x1000, 0x1010)
+        );
+        assert_eq!(builder.files().last().unwrap().basename, b"late.c");
+    }
+
+    fn line_sections(instructions: &[u8]) -> DwarfSections<Vec<u8>> {
+        let mut prologue = vec![1, 1, 251, 14, 13];
+        prologue.extend_from_slice(&[0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]);
+        prologue.extend_from_slice(b"\0main.c\0\0\0\0\0");
+        let mut line = u32::try_from(
+            prologue
+                .len()
+                .saturating_add(instructions.len())
+                .saturating_add(6),
+        )
+        .unwrap()
+        .to_le_bytes()
+        .to_vec();
+        line.extend_from_slice(&2_u16.to_le_bytes());
+        line.extend_from_slice(&u32::try_from(prologue.len()).unwrap().to_le_bytes());
+        line.extend(prologue);
+        line.extend_from_slice(instructions);
+        DwarfSections::load(|id| -> gimli::Result<_> {
+            Ok(if id == SectionId::DebugInfo {
+                vec![12, 0, 0, 0, 4, 0, 0, 0, 0, 0, 8, 1, 0, 0, 0, 0]
+            } else if id == SectionId::DebugAbbrev {
+                vec![1, 0x11, 0, 0x10, 0x17, 0, 0, 0]
+            } else if id == SectionId::DebugLine {
+                line.clone()
+            } else {
+                Vec::new()
+            })
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn malformed_line_program_preserves_gimli_errors() {
+        for instructions in [&[0][..], &[0, 0], &[0, 9, 2, 1], &[2, 0x80], &[0xff, 0]] {
+            let sections = line_sections(instructions);
+            let dwarf = sections.borrow(|data| EndianSlice::new(data, LittleEndian));
+            let unit = dwarf.unit(dwarf.units().next().unwrap().unwrap()).unwrap();
+            let expected = gimli_error(unit.line_program.clone().unwrap().sequences().unwrap_err());
+            let error = collect_lines(&dwarf, &unit, &mut GsymBuilder::new(), &mut Vec::new())
+                .err()
+                .expect("malformed line program");
+            assert_eq!(format!("{error:?}"), format!("{expected:?}"));
+            assert_eq!(error.to_string(), expected.to_string());
+        }
+    }
 
     #[test]
     fn recognizes_llvm_absolute_paths_from_posix_and_windows() {

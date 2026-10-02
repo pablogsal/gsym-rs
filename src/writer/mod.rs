@@ -9,7 +9,7 @@ use self::encode::{address_offset_width, encode_v1, encode_v2};
 use self::finalize::finalize;
 use self::semantic::{StringTable, encode_function, intern_files};
 use crate::builder::GsymBuilder;
-use crate::validation::{validate_file_table, validate_for_writer};
+use crate::validation::validate_file_table;
 use crate::{Endian, Error, GsymVersion, Result};
 
 /// Settings controlling deterministic GSYM encoding.
@@ -64,11 +64,9 @@ pub(crate) fn write_builder(builder: GsymBuilder, mut output: impl Write) -> Res
 }
 
 fn encode_builder(builder: GsymBuilder) -> Result<encode::EncodedImage> {
+    validate_file_table(builder.files())?;
+    builder.validate_file_references()?;
     let (options, function_set, files, functions) = builder.into_parts();
-    validate_file_table(&files)?;
-    for function in &functions {
-        validate_for_writer(function, files.len())?;
-    }
     let functions = finalize(functions, &options, function_set);
     let first = functions
         .first()
@@ -94,10 +92,10 @@ fn encode_builder(builder: GsymBuilder) -> Result<encode::EncodedImage> {
             .saturating_add(files.len().saturating_mul(2)),
     );
     let encoded_files = intern_files(&files, &mut strings);
-    let mut encoded_functions = Vec::with_capacity(functions.len());
-    for function in functions {
-        encoded_functions.push(encode_function(function, &mut strings)?);
-    }
+    let encoded_functions = functions
+        .into_iter()
+        .map(|function| encode_function(function, &mut strings))
+        .collect::<Result<Vec<_>>>()?;
     let image = match options.writer.version {
         GsymVersion::V1 => encode_v1(
             &options.writer,

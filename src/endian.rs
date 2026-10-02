@@ -236,6 +236,22 @@ impl Encoder {
     }
 
     pub(crate) fn write_uint(&mut self, value: u64, width: u8) -> Result<()> {
+        match width {
+            4 => {
+                let value = u32::try_from(value).map_err(|_| Error::OutOfRange {
+                    field: "fixed-width integer",
+                    value,
+                    max: u64::from(u32::MAX),
+                })?;
+                self.write_u32(value);
+                return Ok(());
+            }
+            8 => {
+                self.write_u64(value);
+                return Ok(());
+            }
+            _ => {}
+        }
         if !(1..=8).contains(&width) {
             return Err(Error::OutOfRange {
                 field: "integer width",

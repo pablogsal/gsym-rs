@@ -1,7 +1,7 @@
 //!
 //! [`ElfConverter`](crate::convert::ElfConverter) reads an ELF image, imports
 //! its `STT_FUNC` symbols and DWARF subprogram information, and returns a
-//! populated [`GsymBuilder`](crate::GsymBuilder) rather than finished bytes, so
+//! populated [`GsymBuilder`] rather than finished bytes, so
 //! the model can be inspected or edited before an encoding is chosen.
 //!
 //! ```no_run
@@ -27,7 +27,7 @@
 //! that cannot be used at all, such as a malformed image or a companion file
 //! belonging to a different build.
 //!
-//! See [`docs::conversion`](crate::docs::conversion) for the full guide.
+//! See [`docs::conversion`] for the full guide.
 
 mod diagnostic;
 mod dwarf;
