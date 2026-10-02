@@ -5,7 +5,7 @@ use std::io::Write;
 use hashbrown::HashTable;
 
 use crate::model::{AddressRange, FileEntry, FileIndex, Function};
-use crate::validation::validate_for_builder;
+use crate::validation::{validate_for_builder, validate_function_files};
 use crate::writer::WriterOptions;
 use crate::{Error, GsymVersion, Result};
 
@@ -112,6 +112,7 @@ pub struct GsymBuilder {
     file_index: HashTable<FileSlot>,
     hasher: RandomState,
     functions: Vec<Function>,
+    maximum_file_index: FileIndex,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -160,6 +161,7 @@ impl GsymBuilder {
             file_index,
             hasher,
             functions: Vec::new(),
+            maximum_file_index: FileIndex::ZERO,
         }
     }
 
@@ -309,7 +311,8 @@ impl GsymBuilder {
     /// Returns an error for an empty name, invalid range, oversized function,
     /// or line outside the function range.
     pub fn add_function(&mut self, function: Function) -> Result<()> {
-        validate_for_builder(&function)?;
+        let maximum = validate_for_builder(&function)?;
+        self.maximum_file_index = self.maximum_file_index.max(maximum);
         self.functions.push(function);
         Ok(())
     }
@@ -344,6 +347,17 @@ impl GsymBuilder {
     /// GSYM version.
     pub fn to_bytes(self) -> Result<Vec<u8>> {
         crate::writer::encode_builder_to_bytes(self)
+    }
+
+    pub(crate) fn validate_file_references(&self) -> Result<()> {
+        if self.maximum_file_index.get() as usize >= self.files.len() {
+            // Traverse only when some reference is invalid, retaining the
+            // original first-error order across line, inline and merged data.
+            for function in &self.functions {
+                validate_function_files(function, self.files.len())?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn into_parts(

@@ -142,3 +142,46 @@ fn model_rejects_function_sizes_that_do_not_fit_the_wire_format() {
         } if limit == u64::from(u32::MAX)
     ));
 }
+
+#[test]
+fn writer_checks_deferred_file_references_in_tree_order() {
+    let range = AddressRange::new(0x1000, 0x1010);
+    let function = Function {
+        lines: vec![LineEntry::new(range.start, 1.into(), 7)],
+        inline: Some(InlineNode {
+            ranges: vec![range],
+            call_file: 2.into(),
+            ..InlineNode::default()
+        }),
+        merged: vec![Function {
+            lines: vec![LineEntry::new(range.start, 3.into(), 9)],
+            ..Function::new(range, b"alias")
+        }],
+        ..Function::new(range, b"function")
+    };
+    for file_count in 0..=3 {
+        let mut builder = GsymBuilder::new();
+        builder.add_function(function.clone()).unwrap();
+        for index in 0..file_count {
+            builder
+                .add_file(FileEntry::new(b"src", format!("{index}.rs")))
+                .unwrap();
+        }
+        let result = builder.to_bytes();
+        match file_count {
+            0 | 2 => assert!(matches!(
+                result,
+                Err(Error::InvalidModel("line references a missing file"))
+            )),
+            1 => assert!(matches!(
+                result,
+                Err(Error::InvalidModel(
+                    "inline call site references a missing file"
+                ))
+            )),
+            _ => {
+                result.unwrap();
+            }
+        }
+    }
+}

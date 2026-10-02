@@ -18,20 +18,38 @@ pub(crate) fn validate_file_table(files: &[FileEntry]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_for_builder(function: &Function) -> Result<()> {
-    validate_function_tree(function, None, None, 0)
+pub(crate) fn validate_for_builder(function: &Function) -> Result<FileIndex> {
+    validate_function_tree(function, None, 0)
 }
 
-pub(crate) fn validate_for_writer(function: &Function, file_count: usize) -> Result<()> {
-    validate_function_tree(function, Some(file_count), None, 0)
+// GsymBuilder validates structure before taking ownership and never exposes
+// mutable functions. Only file references can become valid after insertion.
+pub(crate) fn validate_function_files(function: &Function, file_count: usize) -> Result<()> {
+    for line in &function.lines {
+        validate_file_index(line.file, file_count, FileReferenceKind::Line)?;
+    }
+    if let Some(inline) = &function.inline {
+        validate_inline_files(inline, file_count)?;
+    }
+    for merged in &function.merged {
+        validate_function_files(merged, file_count)?;
+    }
+    Ok(())
+}
+
+fn validate_inline_files(node: &InlineNode, file_count: usize) -> Result<()> {
+    validate_file_index(node.call_file, file_count, FileReferenceKind::InlineCall)?;
+    for child in &node.children {
+        validate_inline_files(child, file_count)?;
+    }
+    Ok(())
 }
 
 fn validate_function_tree(
     function: &Function,
-    file_count: Option<usize>,
     merged_parent: Option<AddressRange>,
     merged_depth: usize,
-) -> Result<()> {
+) -> Result<FileIndex> {
     check_merged_depth(merged_depth)?;
     if function.name.is_empty() {
         return Err(Error::InvalidModel("function name must not be empty"));
@@ -51,16 +69,17 @@ fn validate_function_tree(
             "merged function range differs from its parent",
         ));
     }
+    let mut maximum_file = FileIndex::ZERO;
     for line in &function.lines {
         if line.address < function.range.start
             || (!function.range.is_empty() && line.address >= function.range.end)
         {
             return Err(Error::InvalidModel("line address is outside its function"));
         }
-        validate_file_index(line.file, file_count, FileReferenceKind::Line)?;
+        maximum_file = maximum_file.max(line.file);
     }
     if let Some(inline) = &function.inline {
-        validate_inline(inline, &[function.range], file_count, 0)?;
+        maximum_file = maximum_file.max(validate_inline(inline, &[function.range], 0)?);
     }
     let size = function.range.size();
     if function
@@ -73,22 +92,16 @@ fn validate_function_tree(
         ));
     }
     for merged in &function.merged {
-        validate_function_tree(
+        maximum_file = maximum_file.max(validate_function_tree(
             merged,
-            file_count,
             Some(function.range),
             merged_depth.saturating_add(1),
-        )?;
+        )?);
     }
-    Ok(())
+    Ok(maximum_file)
 }
 
-fn validate_inline(
-    node: &InlineNode,
-    parents: &[AddressRange],
-    file_count: Option<usize>,
-    depth: usize,
-) -> Result<()> {
+fn validate_inline(node: &InlineNode, parents: &[AddressRange], depth: usize) -> Result<FileIndex> {
     check_inline_depth(depth)?;
     if node.ranges.is_empty() {
         return Err(Error::InvalidModel("inline node must contain a range"));
@@ -110,19 +123,23 @@ fn validate_inline(
         }
         previous_end = Some(range.end);
     }
-    validate_file_index(node.call_file, file_count, FileReferenceKind::InlineCall)?;
+    let mut maximum_file = node.call_file;
     for child in &node.children {
-        validate_inline(child, &node.ranges, file_count, depth.saturating_add(1))?;
+        maximum_file = maximum_file.max(validate_inline(
+            child,
+            &node.ranges,
+            depth.saturating_add(1),
+        )?);
     }
-    Ok(())
+    Ok(maximum_file)
 }
 
-fn validate_file_index(
+const fn validate_file_index(
     index: FileIndex,
-    file_count: Option<usize>,
+    file_count: usize,
     kind: FileReferenceKind,
 ) -> Result<()> {
-    if file_count.is_some_and(|count| index.get() as usize >= count) {
+    if index.get() as usize >= file_count {
         return Err(Error::InvalidModel(match kind {
             FileReferenceKind::Line => "line references a missing file",
             FileReferenceKind::InlineCall => "inline call site references a missing file",
