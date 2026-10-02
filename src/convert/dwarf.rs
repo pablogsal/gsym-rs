@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use gimli::{
-    AttributeValue, DebuggingInformationEntry, Dwarf, DwarfPackageSections, DwarfSections,
-    EndianSlice, Reader, RelocateReader, RunTimeEndian, Unit,
+    AbbreviationsCacheStrategy, AttributeValue, DebuggingInformationEntry, Dwarf,
+    DwarfPackageSections, DwarfSections, EndianSlice, Reader, RelocateReader, RunTimeEndian, Unit,
 };
 use object::Object;
 
@@ -43,6 +43,22 @@ fn runtime_endian(file: &object::File<'_>) -> RunTimeEndian {
     } else {
         RunTimeEndian::Big
     }
+}
+
+fn borrow_dwarf<'a>(
+    sections: &'a DwarfSections<SectionData<'_>>,
+    endian: RunTimeEndian,
+) -> Dwarf<SectionReader<'a, 'a>> {
+    let mut dwarf = sections.borrow(|section| {
+        RelocateReader::new(
+            EndianSlice::new(section.data.as_ref(), endian),
+            &section.relocations,
+        )
+    });
+    // References can revisit even a unit with its own abbreviation table.
+    // Gimli's cache lookups do not populate the cache on a miss.
+    dwarf.populate_abbreviations_cache(AbbreviationsCacheStrategy::All);
+    dwarf
 }
 
 fn unsigned_attribute<R: Reader<Offset = usize>>(
@@ -117,12 +133,10 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
     let supplementary_sections = supplementary
         .map(|file| DwarfSections::load(|id| load_section(file, id, layout)))
         .transpose()?;
-    let dwarf = sections.borrow_with_sup(supplementary_sections.as_ref(), |section| {
-        RelocateReader::new(
-            EndianSlice::new(section.data.as_ref(), endian),
-            &section.relocations,
-        )
-    });
+    let mut dwarf = borrow_dwarf(&sections, endian);
+    if let Some(sections) = &supplementary_sections {
+        dwarf.set_sup(borrow_dwarf(sections, endian));
+    }
     let package_endian = dwp.map(runtime_endian);
     let package_sections = dwp
         .map(|file| DwarfPackageSections::load(|id| load_dwo_section(file, id, layout)))
@@ -176,7 +190,8 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
             }
             if let Some(package) = &dwp_package {
                 match package.find_cu(dwo_id, &dwarf).map_err(gimli_error) {
-                    Ok(Some(dwo)) => {
+                    Ok(Some(mut dwo)) => {
+                        dwo.populate_abbreviations_cache(AbbreviationsCacheStrategy::All);
                         let split_unit = find_split_unit(&dwo, dwo_id)?;
                         import_split_unit_for_skeleton(
                             &dwo,
@@ -229,12 +244,7 @@ fn try_import_loose_dwo<'data, 'relocations>(
         Ok(None) => return Ok(LooseDwoImport::Unavailable),
         Err(error) => return Ok(LooseDwoImport::Failed(format!("DWO: {error}").into())),
     };
-    let mut dwo = sections.borrow(|section| {
-        RelocateReader::new(
-            EndianSlice::new(section.data.as_ref(), endian),
-            &section.relocations,
-        )
-    });
+    let mut dwo = borrow_dwarf(&sections, endian);
     dwo.make_dwo(parent);
     let split_unit = match find_split_unit(&dwo, dwo_id) {
         Ok(unit) => unit,
@@ -551,9 +561,35 @@ fn is_live_range(range: AddressRange, executable_ranges: &[AddressRange]) -> boo
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn abbreviations_are_reused_even_when_only_one_unit_uses_the_table() {
+        let sections = DwarfSections::load(|id| -> gimli::Result<_> {
+            let data: &[u8] = if id == gimli::SectionId::DebugInfo {
+                // DWARF 4 unit header followed by a compile-unit DIE.
+                &[8, 0, 0, 0, 4, 0, 0, 0, 0, 0, 8, 1]
+            } else if id == gimli::SectionId::DebugAbbrev {
+                &[1, 0x11, 0, 0, 0, 0]
+            } else {
+                &[]
+            };
+            Ok(SectionData {
+                data: Cow::Borrowed(data),
+                ..SectionData::default()
+            })
+        })
+        .unwrap();
+        let dwarf = borrow_dwarf(&sections, RunTimeEndian::Little);
+        let header = dwarf.units().next().unwrap().unwrap();
+        let first = dwarf.unit(header.clone()).unwrap();
+        let second = dwarf.unit(header).unwrap();
+        assert!(Arc::ptr_eq(&first.abbreviations, &second.abbreviations));
+    }
 
     #[test]
     fn dead_and_invalid_ranges_are_rejected_without_losing_live_ranges() {
