@@ -298,6 +298,7 @@ impl DecodedGsym {
                 .builder_for_functions(window(best)?.iter().copied(), options)?
                 .to_bytes()?;
             let mut ceiling = functions.len().saturating_add(1);
+            let mut ceiling_size = None;
             let mut span = 1_usize;
             while best < functions.len() {
                 let candidate = minimum.saturating_add(span).min(functions.len());
@@ -309,6 +310,7 @@ impl DecodedGsym {
                     .to_bytes()?;
                 if bytes.len() > target_size {
                     ceiling = candidate;
+                    ceiling_size = Some(bytes.len());
                     break;
                 }
                 best = candidate;
@@ -317,8 +319,25 @@ impl DecodedGsym {
             }
             let mut low = best.saturating_add(1);
             let mut high = ceiling.saturating_sub(1);
+            let mut probes = 0_usize;
             while low <= high && high <= functions.len() {
-                let middle = low.saturating_add(high.saturating_sub(low) / 2);
+                let midpoint = low.saturating_add(high.saturating_sub(low) / 2);
+                // Encoded size is often close to linear within a shard. Use
+                // the two measured bounds to approach the target, but bisect
+                // every third probe to bound work for uneven record sizes.
+                let estimate = ceiling_size.and_then(|size| {
+                    let growth = size.checked_sub(best_bytes.len())?;
+                    let available = target_size.checked_sub(best_bytes.len())?;
+                    let scaled = available.checked_mul(ceiling.checked_sub(best)?)?;
+                    let step = scaled.checked_div(growth)?;
+                    best.checked_add(step).map(|index| index.clamp(low, high))
+                });
+                let middle = if probes % 3 == 2 {
+                    midpoint
+                } else {
+                    estimate.unwrap_or(midpoint)
+                };
+                probes = probes.saturating_add(1);
                 let bytes = self
                     .builder_for_functions(window(middle)?.iter().copied(), options)?
                     .to_bytes()?;
@@ -327,6 +346,8 @@ impl DecodedGsym {
                     best_bytes = bytes;
                     low = middle.saturating_add(1);
                 } else {
+                    ceiling = middle;
+                    ceiling_size = Some(bytes.len());
                     high = middle.saturating_sub(1);
                 }
             }
