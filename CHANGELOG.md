@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.1 - 2026-10-02
+
+### Performance
+
+- Populate DWARF abbreviation caches and reuse referenced compilation units and DIEs through bounded caches, including supplementary and split debug information.
+- Execute DWARF line programs once, index file tables densely, and avoid retaining unused DIE attributes.
+- Reduce allocation and sorting during GSYM encoding, and avoid repeated validation during building, verification, and owned decoding.
+- Find segment boundaries using measured encoded sizes while preserving exact output and maximal fitting prefixes.
+
+### Fixed
+
+- Update test assertions and documentation links for Rust 1.99 checks while retaining the Rust 1.88 minimum version.
+- Publish `gsym-cache` 0.1.1 with a cache-verification adjustment for Clippy 1.99.
+- Replace the yanked `chacha20` 0.10.1 lockfile entry with 0.10.2.
+
+### Security
+
+- Update the locked Rustls dependency to 0.23.45 to address RUSTSEC-2026-0285.
+
 ## 0.2.0 - 2026-08-21
 
 ### Added

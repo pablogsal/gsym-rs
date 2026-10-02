@@ -110,7 +110,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! gsym-rs = { version = "0.1", default-features = false }
+//! gsym-rs = { version = "0.2", default-features = false }
 //! ```
 //!
 //! # Errors
