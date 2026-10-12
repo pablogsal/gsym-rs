@@ -43,7 +43,7 @@ jobs:
         run: cargo codspeed build --all-features
 
       - name: Measure and report benchmarks
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        uses: CodSpeedHQ/action@f842b9a3ffe213dbb81768fd7f7eeb4dfcf1c369 # v5.4.2
         with:
           mode: simulation
           run: cargo codspeed run
