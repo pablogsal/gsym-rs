@@ -4,7 +4,7 @@ use std::collections::{HashSet, VecDeque};
 use std::hash::BuildHasher;
 use std::rc::Rc;
 
-use gimli::{AttributeValue, DebuggingInformationEntry, Reader, Unit};
+use gimli::{AttributeValue, DebuggingInformationEntry, Reader, Section, Unit};
 use smallvec::SmallVec;
 
 use super::lines::{FileIndices, intern_header_files};
@@ -492,13 +492,37 @@ pub(super) fn attribute_reader<R: Reader<Offset = usize>>(
     unit: &Unit<R>,
     value: AttributeValue<R>,
 ) -> Result<Option<R>> {
-    if matches!(value, AttributeValue::DebugStrRefSup(_)) && dwarf.sup().is_none() {
-        return Ok(None);
-    }
-    dwarf
-        .attr_string(unit, value)
+    let (section, offset) = if let AttributeValue::DebugStrRef(offset) = value {
+        (dwarf.debug_str.reader(), offset.0)
+    } else if let AttributeValue::DebugLineStrRef(offset) = value {
+        (dwarf.debug_line_str.reader(), offset.0)
+    } else if let AttributeValue::DebugStrRefSup(offset) = value {
+        let Some(supplementary) = dwarf.sup() else {
+            return Ok(None);
+        };
+        (supplementary.debug_str.reader(), offset.0)
+    } else if let AttributeValue::DebugStrOffsetsIndex(index) = value {
+        let offset = dwarf.string_offset(unit, index).map_err(gimli_error)?;
+        (dwarf.debug_str.reader(), offset.0)
+    } else {
+        return dwarf
+            .attr_string(unit, value)
+            .map(Some)
+            .map_err(gimli_error);
+    };
+    section_string(section, offset)
         .map(Some)
         .map_err(gimli_error)
+}
+
+fn section_string<R: Reader<Offset = usize>>(section: &R, offset: usize) -> gimli::Result<R> {
+    let mut input = section.clone();
+    input.skip(offset)?;
+    // Scan long linkage names in blocks instead of one byte at a time.
+    let length = memchr::memchr(0, input.to_slice()?.as_ref())
+        .ok_or_else(|| gimli::Error::UnexpectedEof(input.offset_id()))?;
+    input.truncate(length)?;
+    Ok(input)
 }
 
 #[cfg(test)]
@@ -506,6 +530,23 @@ mod tests {
     use gimli::{DwarfSections, EndianSlice, LittleEndian, SectionId};
 
     use super::*;
+
+    #[test]
+    fn section_strings_match_gimli_at_valid_and_invalid_offsets() {
+        for length in 0..64 {
+            let mut bytes = vec![0xff; length];
+            for byte in bytes.iter_mut().step_by(7) {
+                *byte = 0;
+            }
+            let section = gimli::DebugStr::new(&bytes, LittleEndian);
+            for offset in 0..=length + 1 {
+                assert_eq!(
+                    section_string(section.reader(), offset),
+                    section.get_str(gimli::DebugStrOffset(offset)),
+                );
+            }
+        }
+    }
 
     #[test]
     fn visited_entries_match_a_set_before_and_after_spilling() {

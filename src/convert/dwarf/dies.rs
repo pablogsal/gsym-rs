@@ -4,7 +4,7 @@ use super::lines::FileIndices;
 use super::references::{
     DwarfResolver, VisitedDies, absolute_entry_offset, resolve_name, resolve_reference_name,
 };
-use super::{file_index_attribute, gimli_error, unsigned_attribute};
+use super::{file_index_attribute, gimli_error, read_filtered_entry, unsigned_attribute};
 use crate::Result;
 use crate::convert::ConversionWarning;
 use crate::format::function::check_inline_depth;
@@ -14,6 +14,17 @@ struct Descendants {
     inlines: Vec<InlineNode>,
     call_sites: Vec<CallSite>,
     inline_count: usize,
+    resume_offset: Option<gimli::UnitOffset<usize>>,
+}
+
+#[derive(Default)]
+pub(super) struct SubprogramDetails {
+    pub(super) inline: Option<InlineNode>,
+    pub(super) call_sites: Vec<CallSite>,
+    pub(super) inline_count: usize,
+    // Resume at the first nested subprogram, the next entry outside this
+    // subtree, or the unit end. None means that details were not requested.
+    pub(super) resume_offset: Option<gimli::UnitOffset<usize>>,
 }
 
 struct InlineFrame {
@@ -50,9 +61,9 @@ pub(super) fn extract_subprogram_details<R: Reader<Offset = usize>>(
     function_name: &[u8],
     file_indices: &FileIndices,
     options: &mut DetailOptions<'_>,
-) -> Result<(Option<InlineNode>, Vec<CallSite>, usize)> {
+) -> Result<SubprogramDetails> {
     if !options.include_inlines && !options.include_call_sites {
-        return Ok((None, Vec::new(), 0));
+        return Ok(SubprogramDetails::default());
     }
     let mut context = DetailContext {
         dwarf,
@@ -73,7 +84,12 @@ pub(super) fn extract_subprogram_details<R: Reader<Offset = usize>>(
         call_line: 0,
         children: descendants.inlines,
     });
-    Ok((inline, descendants.call_sites, descendants.inline_count))
+    Ok(SubprogramDetails {
+        inline,
+        call_sites: descendants.call_sites,
+        inline_count: descendants.inline_count,
+        resume_offset: descendants.resume_offset,
+    })
 }
 
 fn collect_descendants<R: Reader<Offset = usize>>(
@@ -84,20 +100,37 @@ fn collect_descendants<R: Reader<Offset = usize>>(
         inlines: Vec::new(),
         call_sites: Vec::new(),
         inline_count: 0,
+        resume_offset: None,
     };
     let mut entries = context
         .unit
-        .entries_at_offset(offset)
+        .entries_raw(Some(offset))
         .map_err(gimli_error)?;
-    let Some(root) = entries.next_dfs().map_err(gimli_error)? else {
+    let mut entry = DebuggingInformationEntry::null();
+    if !entries.read_entry(&mut entry).map_err(gimli_error)? {
         return Ok(result);
-    };
-    let root_depth = root.depth();
+    }
+    let root_depth = entry.depth();
     let mut inline_stack: Vec<InlineFrame> = Vec::new();
     let mut call_site_stack: Vec<CallSiteFrame> = Vec::new();
-    while let Some(entry) = entries.next_dfs().map_err(gimli_error)? {
+    while !entries.is_empty() {
+        if !read_filtered_entry(&mut entries, &mut entry, |tag| {
+            (context.include_inlines && tag == gimli::DW_TAG_inlined_subroutine)
+                || (context.include_call_sites && tag == gimli::DW_TAG_call_site)
+        })
+        .map_err(gimli_error)?
+        {
+            continue;
+        }
+        let entry = &entry;
         if entry.depth() <= root_depth {
+            result.resume_offset.get_or_insert_with(|| entry.offset());
             break;
+        }
+        // The outer importer must still visit nested subprograms. All other
+        // attributes before this offset have already passed through the reader.
+        if entry.tag() == gimli::DW_TAG_subprogram {
+            result.resume_offset.get_or_insert_with(|| entry.offset());
         }
         finish_call_sites(&mut call_site_stack, entry.depth(), &mut result.call_sites);
         while inline_stack
@@ -142,6 +175,9 @@ fn collect_descendants<R: Reader<Offset = usize>>(
             });
         }
     }
+    result
+        .resume_offset
+        .get_or_insert_with(|| entries.next_offset());
     while !inline_stack.is_empty() {
         finish_inline(&mut inline_stack, &mut result.inlines);
     }
@@ -401,7 +437,12 @@ mod tests {
         entries.next_dfs().unwrap().unwrap();
         let subprogram_offset = entries.next_dfs().unwrap().unwrap().offset();
         let mut warnings = Vec::new();
-        let (inline, call_sites, count) = extract_subprogram_details(
+        let SubprogramDetails {
+            inline,
+            call_sites,
+            inline_count: count,
+            ..
+        } = extract_subprogram_details(
             &DwarfResolver::new(&dwarf),
             &unit,
             subprogram_offset,

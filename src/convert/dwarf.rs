@@ -170,9 +170,10 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
     };
     let mut headers = dwarf.units();
     while let Some(header) = headers.next().map_err(gimli_error)? {
-        let unit = dwarf.unit(header).map_err(gimli_error)?;
+        let mut unit = dwarf.unit(header).map_err(gimli_error)?;
         if let Some(dwo_id) = unit.dwo_id {
-            let skeleton_lines = collect_lines(&dwarf, &unit, context.builder, context.warnings)?;
+            let skeleton_lines =
+                collect_lines(&dwarf, &mut unit, context.builder, context.warnings)?;
             let mut failures = Vec::new();
             if let DwoResolver::Filesystem { base } = dwo_resolver {
                 match try_import_loose_dwo(
@@ -222,7 +223,7 @@ pub(super) fn import_dwarf(request: DwarfImport<'_, '_>) -> Result<()> {
             )?;
             continue;
         }
-        import_unit(&dwarf, &unit, &mut context)?;
+        import_unit(&dwarf, &mut unit, &mut context)?;
     }
 
     if context.include_inlines && context.stats.inline_nodes == 0 {
@@ -290,14 +291,14 @@ fn import_split_unit_for_skeleton<R: Reader<Offset = usize>>(
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
     split_unit.copy_relocated_attributes(skeleton_unit);
-    import_split_unit(dwarf, &split_unit, skeleton_lines, context)?;
+    import_split_unit(dwarf, &mut split_unit, skeleton_lines, context)?;
     context.stats.split_dwarf_units = context.stats.split_dwarf_units.saturating_add(1);
     Ok(())
 }
 
 fn import_unit<R: Reader<Offset = usize>>(
     dwarf: &Dwarf<R>,
-    unit: &Unit<R>,
+    unit: &mut Unit<R>,
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
     let unit_lines = collect_lines(dwarf, unit, context.builder, context.warnings)?;
@@ -306,7 +307,7 @@ fn import_unit<R: Reader<Offset = usize>>(
 
 fn import_split_unit<R: Reader<Offset = usize>>(
     dwarf: &Dwarf<R>,
-    unit: &Unit<R>,
+    unit: &mut Unit<R>,
     skeleton_lines: &UnitLines,
     context: &mut ImportContext<'_>,
 ) -> Result<()> {
@@ -350,6 +351,7 @@ fn import_unit_details<R: Reader<Offset = usize>>(
                 continue;
             }
         };
+        let mut resume_offset = None;
         loop {
             let range = match ranges.next() {
                 Ok(Some(range)) => range,
@@ -412,7 +414,7 @@ fn import_unit_details<R: Reader<Offset = usize>>(
                 function_lines.push(declaration);
             }
             context.stats.line_rows = context.stats.line_rows.saturating_add(function_lines.len());
-            let (inline, call_sites, inline_count) = extract_subprogram_details(
+            let details = extract_subprogram_details(
                 &resolver,
                 unit,
                 entry.offset(),
@@ -425,16 +427,26 @@ fn import_unit_details<R: Reader<Offset = usize>>(
                     warnings: context.warnings,
                 },
             )?;
-            context.stats.inline_nodes = context.stats.inline_nodes.saturating_add(inline_count);
+            resume_offset = details.resume_offset;
+            context.stats.inline_nodes = context
+                .stats
+                .inline_nodes
+                .saturating_add(details.inline_count);
             context.builder.add_function(Function {
                 range: AddressRange::new(range.begin, range.end),
                 name: name.clone(),
                 lines: function_lines,
-                inline,
-                call_sites,
+                inline: details.inline,
+                call_sites: details.call_sites,
                 ..Function::default()
             })?;
             context.stats.dwarf_functions = context.stats.dwarf_functions.saturating_add(1);
+        }
+        if let Some(offset) = resume_offset {
+            if offset.0 == unit.header.length_including_self() {
+                break;
+            }
+            entries = unit.entries_raw(Some(offset)).map_err(gimli_error)?;
         }
     }
     Ok(())
@@ -445,21 +457,37 @@ fn next_subprogram<'entry, R: Reader>(
     entry: &'entry mut DebuggingInformationEntry<R>,
 ) -> gimli::Result<Option<&'entry DebuggingInformationEntry<R>>> {
     while !entries.is_empty() {
-        let mut probe = entries.clone();
-        if let Some(abbreviation) = probe.read_abbreviation()? {
-            if abbreviation.tag() == gimli::DW_TAG_subprogram {
-                entries.read_entry(entry)?;
-                return Ok(Some(entry));
-            }
-            // Parse unused attributes to preserve errors, but avoid building
-            // an attribute vector for entries the importer does not consume.
-            for specification in abbreviation.attributes() {
-                drop(probe.read_attribute_inline(*specification)?);
-            }
+        read_filtered_entry(entries, entry, |tag| tag == gimli::DW_TAG_subprogram)?;
+        if entry.tag() == gimli::DW_TAG_subprogram {
+            return Ok(Some(entry));
         }
-        *entries = probe;
     }
     Ok(None)
+}
+
+fn read_filtered_entry<R: Reader>(
+    entries: &mut gimli::EntriesRaw<'_, R>,
+    entry: &mut DebuggingInformationEntry<R>,
+    retain_attributes: impl FnOnce(gimli::DwTag) -> bool,
+) -> gimli::Result<bool> {
+    entry.offset = entries.next_offset();
+    entry.depth = entries.next_depth();
+    let Some(abbreviation) = entries.read_abbreviation()? else {
+        entry.set_null();
+        return Ok(false);
+    };
+    entry.tag = abbreviation.tag();
+    entry.has_children = abbreviation.has_children();
+    if retain_attributes(entry.tag) {
+        entries.read_attributes(abbreviation.attributes(), &mut entry.attrs)?;
+    } else {
+        entry.attrs.clear();
+        // Parse unused attributes to preserve errors without an attribute vector.
+        for specification in abbreviation.attributes() {
+            drop(entries.read_attribute_inline(*specification)?);
+        }
+    }
+    Ok(true)
 }
 
 fn load_dwo<R: Reader<Offset = usize>>(
@@ -639,6 +667,74 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn lexical_blocks_end_previous_inline_scopes() {
+        let abbreviations = vec![
+            1, 0x11, 1, 0, 0, // Compile unit.
+            2, 0x2e, 1, 0, 0, // Subprogram.
+            3, 0x1d, 1, 3, 8, 0x11, 1, 0x12, 6, 0, 0, // Inline with children.
+            4, 0x0b, 1, 0, 0, // Lexical block.
+            5, 0x34, 0, 0, 0, // Variable.
+            6, 0x1d, 0, 3, 8, 0x11, 1, 0x12, 6, 0, 0, // Inline without children.
+            0,
+        ];
+        let mut body = vec![1, 2, 3];
+        body.extend_from_slice(b"first\0");
+        body.extend_from_slice(&0x1000_u64.to_le_bytes());
+        body.extend_from_slice(&0x10_u32.to_le_bytes());
+        body.extend_from_slice(&[5, 0, 4, 6]);
+        body.extend_from_slice(b"second\0");
+        body.extend_from_slice(&0x1020_u64.to_le_bytes());
+        body.extend_from_slice(&0x10_u32.to_le_bytes());
+        body.extend_from_slice(&[0, 0, 0]);
+        let mut info = u32::try_from(body.len() + 7)
+            .unwrap()
+            .to_le_bytes()
+            .to_vec();
+        info.extend_from_slice(&[4, 0, 0, 0, 0, 0, 8]);
+        info.extend(body);
+        let sections = DwarfSections::load(|id| -> gimli::Result<_> {
+            Ok(if id == gimli::SectionId::DebugInfo {
+                info.clone()
+            } else if id == gimli::SectionId::DebugAbbrev {
+                abbreviations.clone()
+            } else {
+                Vec::new()
+            })
+        })
+        .unwrap();
+        let dwarf = sections.borrow(|data| EndianSlice::new(data, gimli::LittleEndian));
+        let unit = dwarf.unit(dwarf.units().next().unwrap().unwrap()).unwrap();
+        let resolver = DwarfResolver::new(&dwarf);
+        let mut warnings = Vec::new();
+        let details = extract_subprogram_details(
+            &resolver,
+            &unit,
+            gimli::UnitOffset(12),
+            AddressRange::new(0x1000, 0x1040),
+            b"function",
+            &lines::FileIndices::default(),
+            &mut DetailOptions {
+                include_inlines: true,
+                include_call_sites: true,
+                warnings: &mut warnings,
+            },
+        )
+        .unwrap();
+        let children = details.inline.unwrap().children;
+        assert_eq!(details.inline_count, 2);
+        assert_eq!(
+            children
+                .iter()
+                .map(|node| node.name.as_slice())
+                .collect::<Vec<_>>(),
+            [b"first".as_slice(), b"second".as_slice()]
+        );
+        assert!(children.iter().all(|node| node.children.is_empty()));
+        assert_eq!(details.call_sites.len(), 0);
+        assert_eq!(warnings.len(), 0);
     }
 
     #[test]

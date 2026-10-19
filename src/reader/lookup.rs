@@ -230,8 +230,7 @@ impl<D: AsRef<[u8]>> Gsym<D> {
                 address: request.address,
                 frames: &mut scratch.inline_frames,
             };
-            let (present, _) =
-                scan_inline_node(&mut cursor, function.range.start, true, 0, &mut scan)?;
+            let (present, _) = scan_inline_node(&mut cursor, function.range.start, 0, &mut scan)?;
             if !present || !cursor.is_empty() {
                 return Err(Error::InvalidFormat("malformed inline-info payload"));
             }
@@ -375,7 +374,6 @@ struct InlineScan<'scratch> {
 fn scan_inline_node(
     cursor: &mut Cursor<'_>,
     base: u64,
-    collect: bool,
     depth: usize,
     scan: &mut InlineScan<'_>,
 ) -> Result<(bool, bool)> {
@@ -399,9 +397,7 @@ fn scan_inline_node(
             .checked_add(read_uleb(cursor)?)
             .ok_or(Error::Overflow("inline range end"))?;
         first_start.get_or_insert(start);
-        if collect {
-            contains |= start <= scan.address && scan.address < end;
-        }
+        contains |= start <= scan.address && scan.address < end;
     }
     let first_start = first_start.ok_or(Error::InvalidFormat(
         "inline node declares no address range",
@@ -410,8 +406,7 @@ fn scan_inline_node(
     let name = cursor.read_uint(scan.string_offset_size)?;
     let call_file = read_uleb(cursor)?;
     let call_line = read_uleb(cursor)?;
-    let matched = collect && contains;
-    let original_len = scan.frames.len();
+    let matched = contains;
     if matched && name != 0 {
         scan.frames.push(RawInlineFrame {
             name,
@@ -429,26 +424,87 @@ fn scan_inline_node(
         });
     }
     if has_children {
-        let child_base = first_start;
-        let mut found_child = false;
-        loop {
-            let (present, child_matched) = scan_inline_node(
-                cursor,
-                child_base,
-                matched && !found_child,
-                depth.saturating_add(1),
-                scan,
-            )?;
-            if !present {
-                break;
+        let child_depth = depth.saturating_add(1);
+        if matched {
+            loop {
+                let (present, child_matched) =
+                    scan_inline_node(cursor, first_start, child_depth, scan)?;
+                if !present {
+                    break;
+                }
+                if child_matched {
+                    skip_inline_children(
+                        cursor,
+                        first_start,
+                        child_depth,
+                        scan.string_offset_size,
+                    )?;
+                    break;
+                }
             }
-            found_child |= child_matched;
+        } else {
+            skip_inline_children(cursor, first_start, child_depth, scan.string_offset_size)?;
         }
     }
-    if !matched {
-        scan.frames.truncate(original_len);
-    }
     Ok((true, matched))
+}
+
+// Skipped siblings still require complete structural checks. Keep their traversal
+// on a small stack, with recursion only when that stack fills, so lookup does
+// not allocate even when a skipped subtree is deeper than the matching path.
+fn skip_inline_children(
+    cursor: &mut Cursor<'_>,
+    mut base: u64,
+    depth: usize,
+    string_offset_size: u8,
+) -> Result<()> {
+    let mut parents: SmallVec<[u64; 8]> = SmallVec::new();
+    loop {
+        let current_depth = depth.saturating_add(parents.len());
+        check_inline_depth(current_depth)?;
+        let count = read_uleb(cursor)?;
+        if count == 0 {
+            let Some(parent) = parents.pop() else {
+                return Ok(());
+            };
+            base = parent;
+            continue;
+        }
+        if count > cursor.remaining() as u64 / 2 {
+            return Err(Error::InvalidFormat(
+                "inline range count exceeds remaining payload",
+            ));
+        }
+        let mut first_start = base;
+        for index in 0..count {
+            let start = base
+                .checked_add(read_uleb(cursor)?)
+                .ok_or(Error::Overflow("inline range start"))?;
+            start
+                .checked_add(read_uleb(cursor)?)
+                .ok_or(Error::Overflow("inline range end"))?;
+            if index == 0 {
+                first_start = start;
+            }
+        }
+        let has_children = cursor.read_u8()? != 0;
+        let _ = cursor.read_uint(string_offset_size)?;
+        let _ = read_uleb(cursor)?;
+        let _ = read_uleb(cursor)?;
+        if has_children {
+            if parents.len() == parents.inline_size() {
+                skip_inline_children(
+                    cursor,
+                    first_start,
+                    current_depth.saturating_add(1),
+                    string_offset_size,
+                )?;
+            } else {
+                parents.push(base);
+                base = first_start;
+            }
+        }
+    }
 }
 
 fn read_call_site_patterns<'data, D: AsRef<[u8]>>(
@@ -477,3 +533,6 @@ fn read_call_site_patterns<'data, D: AsRef<[u8]>>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

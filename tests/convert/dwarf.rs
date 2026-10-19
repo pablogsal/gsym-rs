@@ -62,6 +62,56 @@ fn statement_sequence_lines(report: &gsym::convert::ConversionReport) -> Vec<(u6
 }
 
 #[test]
+fn imports_nested_subprograms_after_their_parent() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("nested.c");
+    let image = directory.path().join("nested");
+    std::fs::write(
+        &source,
+        "__attribute__((noinline)) int outer(int n) {\n\
+         __attribute__((noinline)) int inner(int x) { return x + n; }\n\
+         return inner(3);\n}\n\
+         int main(void) { return outer(1); }\n",
+    )
+    .unwrap();
+    run(Command::new(required_tool("gcc")).args([
+        "-g",
+        "-gdwarf-5",
+        "-O0",
+        "-o",
+        image.to_str().unwrap(),
+        source.to_str().unwrap(),
+    ]));
+    for details in [false, true] {
+        let report = ElfConverter::new(ConversionOptions {
+            include_symbols: false,
+            dwarf: Some(DwarfImportOptions {
+                inline_info: details,
+                call_sites: details,
+            }),
+            ..ConversionOptions::default()
+        })
+        .convert_path(&image)
+        .unwrap();
+        let names = report
+            .builder
+            .functions()
+            .iter()
+            .map(|function| function.name.as_slice())
+            .collect::<Vec<_>>();
+        let outer = names.iter().position(|name| *name == b"outer").unwrap();
+        let inner = names.iter().position(|name| *name == b"inner").unwrap();
+        assert!(outer < inner);
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&b"main".as_slice()));
+        Gsym::parse(report.builder.to_bytes().unwrap())
+            .unwrap()
+            .verify()
+            .unwrap();
+    }
+}
+
+#[test]
 fn linker_tombstones_are_filtered_without_hiding_unexpected_ranges() {
     let options = ConversionOptions {
         include_symbols: false,

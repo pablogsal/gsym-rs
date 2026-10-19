@@ -122,11 +122,11 @@ impl UnitLines {
 
 pub(super) fn collect_lines<R: Reader<Offset = usize>>(
     dwarf: &gimli::Dwarf<R>,
-    unit: &gimli::Unit<R>,
+    unit: &mut gimli::Unit<R>,
     builder: &mut GsymBuilder,
     warnings: &mut Vec<ConversionWarning>,
 ) -> Result<UnitLines> {
-    let line_program = if let Some(line_program) = unit.line_program.clone() {
+    let line_program = if let Some(line_program) = unit.line_program.take() {
         line_program
     } else if dwarf.file_type == DwarfFileType::Dwo
         && matches!(unit.header.version(), 4 | 5)
@@ -582,10 +582,10 @@ mod tests {
 
         let sections = line_sections(&instructions);
         let dwarf = sections.borrow(|data| EndianSlice::new(data, LittleEndian));
-        let unit = dwarf.unit(dwarf.units().next().unwrap().unwrap()).unwrap();
+        let mut unit = dwarf.unit(dwarf.units().next().unwrap().unwrap()).unwrap();
         let mut builder = GsymBuilder::new();
         let mut warnings = Vec::new();
-        let lines = collect_lines(&dwarf, &unit, &mut builder, &mut warnings).unwrap();
+        let lines = collect_lines(&dwarf, &mut unit, &mut builder, &mut warnings).unwrap();
         assert_eq!(warnings.len(), 0);
         assert_eq!(lines.entries.len(), 1);
         assert_eq!(
@@ -636,9 +636,9 @@ mod tests {
         for instructions in [&[0][..], &[0, 0], &[0, 9, 2, 1], &[2, 0x80], &[0xff, 0]] {
             let sections = line_sections(instructions);
             let dwarf = sections.borrow(|data| EndianSlice::new(data, LittleEndian));
-            let unit = dwarf.unit(dwarf.units().next().unwrap().unwrap()).unwrap();
+            let mut unit = dwarf.unit(dwarf.units().next().unwrap().unwrap()).unwrap();
             let expected = gimli_error(unit.line_program.clone().unwrap().sequences().unwrap_err());
-            let error = collect_lines(&dwarf, &unit, &mut GsymBuilder::new(), &mut Vec::new())
+            let error = collect_lines(&dwarf, &mut unit, &mut GsymBuilder::new(), &mut Vec::new())
                 .err()
                 .expect("malformed line program");
             assert_eq!(format!("{error:?}"), format!("{expected:?}"));
