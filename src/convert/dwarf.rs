@@ -733,8 +733,8 @@ mod tests {
             [b"first".as_slice(), b"second".as_slice()]
         );
         assert!(children.iter().all(|node| node.children.is_empty()));
-        assert!(details.call_sites.is_empty());
-        assert!(warnings.is_empty());
+        assert_eq!(details.call_sites.len(), 0);
+        assert_eq!(warnings.len(), 0);
     }
 
     #[test]
