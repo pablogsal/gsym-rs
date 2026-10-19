@@ -232,3 +232,94 @@ fn fixed_width_reads_and_patches_reject_out_of_bounds() {
     assert_eq!(output.as_slice(), &[1, 0, 0, 0]);
     assert!(output.patch_u32(1, 7).is_err());
 }
+
+fn assert_leb_readers_match(bytes: &[u8], offset: usize) {
+    let mut optimized = Cursor::at(bytes, Endian::Little, offset).unwrap();
+    let mut reference = optimized.clone();
+    let expected = read_uleb_bounded(&mut reference, 64).map_err(|error| format!("{error:?}"));
+    let actual = read_uleb(&mut optimized).map_err(|error| format!("{error:?}"));
+    assert_eq!(actual, expected, "input: {bytes:?}, offset: {offset}");
+    assert_eq!(optimized.position(), reference.position());
+    assert_eq!(optimized.remaining_bytes(), reference.remaining_bytes());
+    let mut optimized = Cursor::at(bytes, Endian::Little, offset).unwrap();
+    let mut reference = optimized.clone();
+    let expected = read_sleb_bounded(&mut reference, 64).map_err(|error| format!("{error:?}"));
+    let actual = read_sleb(&mut optimized).map_err(|error| format!("{error:?}"));
+    assert_eq!(
+        actual, expected,
+        "signed input: {bytes:?}, offset: {offset}"
+    );
+    assert_eq!(optimized.position(), reference.position());
+    assert_eq!(optimized.remaining_bytes(), reference.remaining_bytes());
+}
+
+#[test]
+fn leb_readers_preserve_overflow_errors_and_consumed_bytes() {
+    for first in 0..=u8::MAX {
+        assert_leb_readers_match(&[first], 0);
+        for second in 0..=u8::MAX {
+            assert_leb_readers_match(&[first, second], 0);
+        }
+    }
+    for length in 0..=11 {
+        for continuation in [0x80, 0x81, 0xff] {
+            for last in 0..=u8::MAX {
+                let mut bytes = vec![continuation; length];
+                bytes.push(last);
+                assert_leb_readers_match(&bytes, 0);
+            }
+        }
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn leb_readers_match_bounded_reference(
+        prefix in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..8),
+        suffix in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..32),
+    ) {
+        let offset = prefix.len();
+        let mut bytes = prefix;
+        bytes.extend(suffix);
+        assert_leb_readers_match(&bytes, offset);
+    }
+}
+
+#[test]
+fn cursor_reports_original_offsets_after_successful_and_failed_reads() {
+    let bytes = [1, 2, 3, 4, 5, 6];
+    let mut cursor = Cursor::at(&bytes, Endian::Little, 2).unwrap();
+    assert_eq!(cursor.read_u16().unwrap(), 0x0403);
+    assert!(matches!(
+        cursor.read_u32(),
+        Err(Error::UnexpectedEof {
+            offset: 4,
+            needed: 4,
+            remaining: 2,
+        })
+    ));
+    assert_eq!(cursor.position(), 4);
+    assert_eq!(cursor.remaining(), 2);
+    assert!(matches!(
+        cursor.take(3),
+        Err(Error::UnexpectedEof {
+            offset: 4,
+            needed: 3,
+            remaining: 2,
+        })
+    ));
+    assert!(matches!(
+        cursor.take(usize::MAX),
+        Err(Error::Overflow("cursor end offset"))
+    ));
+    assert_eq!(cursor.read_u16().unwrap(), 0x0605);
+    assert!(cursor.is_empty());
+    assert!(matches!(
+        cursor.read_u8(),
+        Err(Error::UnexpectedEof {
+            offset: 6,
+            needed: 1,
+            remaining: 0,
+        })
+    ));
+}

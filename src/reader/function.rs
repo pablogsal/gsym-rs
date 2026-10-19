@@ -162,10 +162,7 @@ pub(super) fn string_at<'data>(
     let tail = data
         .get(start..table.end)
         .ok_or(Error::InvalidFormat("string table is outside the file"))?;
-    let end = tail
-        .iter()
-        .position(|byte| *byte == 0)
-        .ok_or(Error::InvalidFormat("unterminated string"))?;
+    let end = memchr::memchr(0, tail).ok_or(Error::InvalidFormat("unterminated string"))?;
     tail.get(..end)
         .ok_or(Error::InvalidFormat("unterminated string"))
 }

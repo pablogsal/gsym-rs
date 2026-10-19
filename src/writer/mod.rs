@@ -5,9 +5,9 @@ mod semantic;
 use std::fmt;
 use std::io::Write;
 
-use self::encode::{address_offset_width, encode_v1, encode_v2};
+use self::encode::{address_offset_width, encode_functions, encode_v1, encode_v2};
 use self::finalize::finalize;
-use self::semantic::{StringTable, encode_function, intern_files};
+use self::semantic::{StringTable, intern_files, validate_merged_depth};
 use crate::builder::GsymBuilder;
 use crate::validation::validate_file_table;
 use crate::{Endian, Error, GsymVersion, Result};
@@ -86,16 +86,28 @@ fn encode_builder(builder: GsymBuilder) -> Result<encode::EncodedImage> {
             .saturating_sub(base),
     );
 
+    // Finalization can add a parent around an existing merged tree. Check the
+    // resulting depth before checking format-specific limits.
+    validate_merged_depth(&functions, 0)?;
     let mut strings = StringTable::with_capacity(
         functions
             .len()
             .saturating_add(files.len().saturating_mul(2)),
     );
     let encoded_files = intern_files(&files, &mut strings);
-    let encoded_functions = functions
-        .into_iter()
-        .map(|function| encode_function(function, &mut strings))
-        .collect::<Result<Vec<_>>>()?;
+    if options.writer.version == GsymVersion::V1
+        && options.writer.build_id.len() > crate::format::v1::MAX_UUID_SIZE
+    {
+        return Err(Error::V1BuildIdTooLong {
+            size: options.writer.build_id.len(),
+        });
+    }
+    let string_width = match options.writer.version {
+        GsymVersion::V1 => 4,
+        GsymVersion::V2 => 8,
+    };
+    let encoded_functions =
+        encode_functions(functions, &mut strings, options.writer.endian, string_width)?;
     let image = match options.writer.version {
         GsymVersion::V1 => encode_v1(
             &options.writer,
@@ -103,7 +115,7 @@ fn encode_builder(builder: GsymBuilder) -> Result<encode::EncodedImage> {
             width,
             &encoded_files,
             strings.bytes(),
-            &encoded_functions,
+            encoded_functions,
         )?,
         GsymVersion::V2 => encode_v2(
             &options.writer,
@@ -111,7 +123,7 @@ fn encode_builder(builder: GsymBuilder) -> Result<encode::EncodedImage> {
             width,
             &encoded_files,
             strings.bytes(),
-            &encoded_functions,
+            encoded_functions,
         )?,
     };
     Ok(image)

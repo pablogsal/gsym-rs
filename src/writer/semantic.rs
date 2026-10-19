@@ -92,30 +92,25 @@ pub(super) fn intern_files(files: &[FileEntry], strings: &mut StringTable) -> Ve
         .collect()
 }
 
-pub(super) fn encode_function(
-    function: Function,
-    strings: &mut StringTable,
-) -> Result<EncodedFunction> {
-    encode_function_at(function, strings, 0)
+pub(super) fn validate_merged_depth(functions: &[Function], depth: usize) -> Result<()> {
+    for function in functions {
+        check_merged_depth(depth)?;
+        if !function.merged.is_empty() {
+            validate_merged_depth(&function.merged, depth.saturating_add(1))?;
+        }
+    }
+    Ok(())
 }
 
-fn encode_function_at(
-    function: Function,
-    strings: &mut StringTable,
-    depth: usize,
-) -> Result<EncodedFunction> {
-    check_merged_depth(depth)?;
+pub(super) fn encode_function(function: Function, strings: &mut StringTable) -> EncodedFunction {
     let name = strings.intern(&function.name);
     let lines = (!function.lines.is_empty()).then_some(function.lines);
-    let inline = function
-        .inline
-        .map(|inline| encode_inline(inline, strings))
-        .transpose()?;
+    let inline = function.inline.map(|inline| encode_inline(inline, strings));
     let merged = function
         .merged
         .into_iter()
-        .map(|entry| encode_function_at(entry, strings, depth.saturating_add(1)))
-        .collect::<Result<Vec<_>>>()?;
+        .map(|entry| encode_function(entry, strings))
+        .collect();
     let call_sites = function
         .call_sites
         .into_iter()
@@ -132,28 +127,28 @@ fn encode_function_at(
             }
         })
         .collect();
-    Ok(EncodedFunction {
+    EncodedFunction {
         range: function.range,
         name,
         lines,
         inline,
         merged,
         call_sites,
-    })
+    }
 }
 
-fn encode_inline(node: InlineNode, strings: &mut StringTable) -> Result<EncodedInlineNode> {
+fn encode_inline(node: InlineNode, strings: &mut StringTable) -> EncodedInlineNode {
     let name = strings.intern(&node.name);
     let children = node
         .children
         .into_iter()
         .map(|child| encode_inline(child, strings))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(EncodedInlineNode {
+        .collect();
+    EncodedInlineNode {
         ranges: node.ranges,
         name,
         call_file: node.call_file.into(),
         call_line: node.call_line,
         children,
-    })
+    }
 }

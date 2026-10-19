@@ -472,3 +472,30 @@ fn duplicate_selection_counts_the_complete_inline_tree() {
         assert_eq!(decoded.inline.unwrap().children.len(), 1);
     }
 }
+
+#[test]
+fn finalized_merged_depth_precedes_output_format_errors() {
+    let range = AddressRange::new(0x1000, 0x1010);
+    let mut nested = Function::new(range, b"nested");
+    for _ in 0..16 {
+        nested = Function {
+            merged: vec![nested],
+            ..Function::new(range, b"nested")
+        };
+    }
+    let mut builder = GsymBuilder::new()
+        .merge_equal_address_functions(true)
+        .build_id(vec![0; 21]);
+    builder
+        .add_function(Function::new(range, b"first"))
+        .unwrap();
+    builder.add_function(nested).unwrap();
+    assert!(matches!(
+        builder.to_bytes(),
+        Err(Error::Limit {
+            context: "merged-function tree depth",
+            value: 17,
+            limit: 16,
+        })
+    ));
+}

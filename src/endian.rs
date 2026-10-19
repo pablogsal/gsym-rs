@@ -47,15 +47,12 @@ impl<'data> Cursor<'data> {
         }
     }
 
-    pub(crate) const fn at(bytes: &'data [u8], endian: Endian, position: usize) -> Result<Self> {
-        if position > bytes.len() {
-            return Err(Error::InvalidOffset {
+    pub(crate) fn at(bytes: &'data [u8], endian: Endian, position: usize) -> Result<Self> {
+        Ok(Self {
+            bytes: bytes.get(position..).ok_or(Error::InvalidOffset {
                 offset: position as u64,
                 input_len: bytes.len(),
-            });
-        }
-        Ok(Self {
-            bytes,
+            })?,
             position,
             endian,
         })
@@ -70,50 +67,53 @@ impl<'data> Cursor<'data> {
     }
 
     pub(crate) const fn remaining(&self) -> usize {
-        self.bytes.len().saturating_sub(self.position)
+        self.bytes.len()
     }
 
     pub(crate) const fn is_empty(&self) -> bool {
         self.remaining() == 0
     }
 
+    #[inline]
+    pub(crate) const fn remaining_bytes(&self) -> &'data [u8] {
+        self.bytes
+    }
+
+    #[inline]
     pub(crate) fn take(&mut self, count: usize) -> Result<&'data [u8]> {
         let end = self
             .position
             .checked_add(count)
             .ok_or(Error::Overflow("cursor end offset"))?;
-        let Some(bytes) = self.bytes.get(self.position..end) else {
-            return Err(Error::UnexpectedEof {
-                offset: self.position,
-                needed: count,
-                remaining: self.remaining(),
-            });
-        };
+        let (bytes, rest) = self
+            .bytes
+            .split_at_checked(count)
+            .ok_or_else(|| cursor_eof(self.position, count, self.bytes.len()))?;
+        self.bytes = rest;
         self.position = end;
         Ok(bytes)
     }
 
+    #[inline]
     pub(crate) fn take_array<const N: usize>(&mut self) -> Result<[u8; N]> {
-        let offset = self.position;
-        let remaining = self.remaining();
-        let bytes = self
+        let (bytes, rest) = self
             .bytes
-            .get(offset..)
-            .and_then(<[u8]>::first_chunk::<N>)
-            .ok_or(Error::UnexpectedEof {
-                offset,
-                needed: N,
-                remaining,
-            })?;
-        self.position = offset.saturating_add(N);
+            .split_first_chunk::<N>()
+            .ok_or_else(|| cursor_eof(self.position, N, self.bytes.len()))?;
+        self.bytes = rest;
+        // The original slice contains both consumed and remaining bytes.
+        // A successful read therefore cannot overflow the consumed length.
+        self.position = self.position.wrapping_add(N);
         Ok(*bytes)
     }
 
+    #[inline]
     pub(crate) fn read_u8(&mut self) -> Result<u8> {
         let [byte] = self.take_array()?;
         Ok(byte)
     }
 
+    #[inline]
     pub(crate) fn read_u16(&mut self) -> Result<u16> {
         let bytes = self.take_array()?;
         Ok(match self.endian {
@@ -122,6 +122,7 @@ impl<'data> Cursor<'data> {
         })
     }
 
+    #[inline]
     pub(crate) fn read_u32(&mut self) -> Result<u32> {
         let bytes = self.take_array()?;
         Ok(match self.endian {
@@ -130,6 +131,7 @@ impl<'data> Cursor<'data> {
         })
     }
 
+    #[inline]
     pub(crate) fn read_u64(&mut self) -> Result<u64> {
         let bytes = self.take_array()?;
         Ok(match self.endian {
@@ -138,6 +140,7 @@ impl<'data> Cursor<'data> {
         })
     }
 
+    #[inline]
     pub(crate) fn read_uint(&mut self, width: u8) -> Result<u64> {
         match width {
             1 => return self.read_u8().map(u64::from),
@@ -171,6 +174,15 @@ impl<'data> Cursor<'data> {
             Endian::Little => u64::from_le_bytes(buffer),
             Endian::Big => u64::from_be_bytes(buffer),
         })
+    }
+}
+
+#[cold]
+const fn cursor_eof(offset: usize, needed: usize, remaining: usize) -> Error {
+    Error::UnexpectedEof {
+        offset,
+        needed,
+        remaining,
     }
 }
 
