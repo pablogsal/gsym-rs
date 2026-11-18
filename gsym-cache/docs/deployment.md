@@ -24,9 +24,15 @@ application directories are checked before use; shared writable anchors are
 rejected unless their replacement rules are safe.
 
 Services and privileged processes should use [`Cache::open`](crate::Cache::open)
-with an explicitly configured absolute root. The root must be a private,
-non-symlink directory owned by the effective user. Its parent must prevent an
+with an explicitly configured absolute root. The resolved root must be a
+private directory owned by the effective user. Its parent must prevent an
 untrusted user from replacing the root.
+
+The cache resolves symlinks to existing directories in an explicit root or
+the XDG cache-home path when it opens. Missing child directories remain valid.
+For XDG paths, the cache-home parent must exist.
+A later change to a symlink does not redirect that cache.
+Paths inside the cache continue to reject symlinks.
 
 Use a separate root for each trust domain. A build ID identifies an artifact;
 it does not authenticate the bytes supplied by a downloader or converter.
