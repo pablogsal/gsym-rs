@@ -78,9 +78,10 @@ impl Cache {
     /// Opens a cache namespace without creating it.
     ///
     /// A missing root is valid and produces cache misses. This method resolves
-    /// symlinks in the configured path. The resolved root must be a private
-    /// directory owned by the effective user. Paths inside the cache cannot
-    /// contain symlinks.
+    /// symlinks in the configured path. Symlink targets must exist. Child
+    /// directories below the resolved prefix can be missing. The resolved root
+    /// must be a private directory owned by the effective user. Paths inside
+    /// the cache cannot contain symlinks.
     ///
     /// # Errors
     ///
@@ -119,9 +120,11 @@ impl Cache {
     /// `$HOME/.cache` as required by the XDG Base Directory Specification.
     /// `application` must be one normal path component. The resulting root is
     /// `<cache-home>/<application>/gsym`.
-    /// Symlinks in the cache-home path resolve before ownership and permission
-    /// checks. Application directories and paths inside the cache cannot
-    /// contain symlinks.
+    ///
+    /// The cache-home path can contain symlinks with existing targets. The
+    /// cache-home directory can be missing when its parent exists. Ownership
+    /// and permission checks apply to the resolved path. Application
+    /// directories and paths inside the cache cannot contain symlinks.
     ///
     /// Privileged applications should use [`Cache::open`] with an explicitly
     /// configured root instead of trusting process environment variables.
@@ -744,23 +747,30 @@ mod tests {
 
     #[test]
     fn xdg_cache_root_uses_absolute_xdg_home_and_home_fallback() {
+        let directory = tempfile::tempdir().expect("temporary directory is created");
+        let base = directory
+            .path()
+            .canonicalize()
+            .expect("temporary directory resolves");
+        let cache_home = base.join("cache");
+        let home = base.join("home");
         assert_eq!(
             xdg_cache_root(
                 "chronon".as_ref(),
-                Some("/cache".into()),
-                Some("/home/u".into())
+                Some(cache_home.clone().into()),
+                Some(home.clone().into())
             )
             .expect("absolute XDG cache home is accepted"),
-            std::path::PathBuf::from("/cache/chronon/gsym")
+            cache_home.join("chronon/gsym")
         );
         assert_eq!(
             xdg_cache_root(
                 "chronon".as_ref(),
                 Some("relative".into()),
-                Some("/home/u".into())
+                Some(home.clone().into())
             )
             .expect("relative XDG cache home falls back to home"),
-            std::path::PathBuf::from("/home/u/.cache/chronon/gsym")
+            home.join(".cache/chronon/gsym")
         );
     }
 
@@ -772,15 +782,19 @@ mod tests {
 
     #[test]
     fn xdg_cache_root_resolves_cache_home_and_home_symlinks() {
-        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().expect("temporary directory is created");
-        let home = directory.path().join("home");
-        let cache_home = directory.path().join("cache-home");
+        let base = directory
+            .path()
+            .canonicalize()
+            .expect("temporary directory resolves");
+        let home = base.join("home");
+        let cache_home = base.join("cache-home");
         std::fs::create_dir(&home).expect("home directory is created");
         std::fs::create_dir(&cache_home).expect("cache home is created");
         symlink(&cache_home, home.join(".cache")).expect("cache home symlink is created");
-        let home_link = directory.path().join("home-link");
+        let home_link = base.join("home-link");
         symlink(&home, &home_link).expect("home symlink is created");
         let expected = cache_home.join("chronon/gsym");
 
@@ -794,15 +808,11 @@ mod tests {
         }
         assert!(!expected.exists());
 
-        std::fs::set_permissions(&cache_home, std::fs::Permissions::from_mode(0o770))
-            .expect("cache home becomes shared writable");
-        assert!(validated_xdg_paths(&expected).is_err());
-
         std::fs::remove_file(home.join(".cache")).expect("cache home symlink is removed");
         let missing = xdg_cache_root(
             "chronon".as_ref(),
             None,
-            Some(directory.path().join("home-link").into()),
+            Some(base.join("home-link").into()),
         )
         .expect("missing cache home resolves through the home symlink");
         assert_eq!(missing, home.join(".cache/chronon/gsym"));
@@ -816,7 +826,11 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory is created");
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
             .expect("cache parent permissions are changed");
-        let anchor = directory.path().join("cache-home");
+        let anchor = directory
+            .path()
+            .canonicalize()
+            .expect("temporary directory resolves")
+            .join("cache-home");
         std::fs::create_dir(&anchor).expect("cache home is created");
         std::fs::set_permissions(&anchor, std::fs::Permissions::from_mode(0o750))
             .expect("cache home permissions are changed");

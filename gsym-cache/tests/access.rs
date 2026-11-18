@@ -37,10 +37,14 @@ fn cache_creation_uses_the_resolved_parent_after_a_symlink_changes() {
     use std::os::unix::fs::symlink;
 
     let directory = tempfile::tempdir().expect("temporary directory is created");
-    let target = directory.path().join("target");
+    let base = directory
+        .path()
+        .canonicalize()
+        .expect("temporary directory resolves");
+    let target = base.join("target");
+    let redirect = base.join("redirect");
     std::fs::create_dir(&target).expect("symlink target is created");
-    symlink(&target, directory.path().join("redirect")).expect("test symlink is created");
-    let redirect = directory.path().join("redirect");
+    symlink(&target, &redirect).expect("test symlink is created");
     let cache = Cache::open(redirect.join("gsym"), CacheEpoch::new(1))
         .expect("cache opens through the parent symlink");
 
@@ -48,14 +52,29 @@ fn cache_creation_uses_the_resolved_parent_after_a_symlink_changes() {
     assert!(!target.join("gsym").exists());
 
     std::fs::remove_file(&redirect).expect("parent symlink is removed");
-    symlink(directory.path(), &redirect).expect("parent symlink has a new target");
+    symlink(&base, &redirect).expect("parent symlink has a new target");
     let build_id = BuildId::new([0x42; 20]).expect("test build identifier is valid");
     assert_eq!(
         cache.record_access(&build_id).expect("access is recorded"),
         AccessUpdate::Recorded
     );
     assert!(target.join("gsym").is_dir());
-    assert!(!directory.path().join("gsym").exists());
+    assert!(!base.join("gsym").exists());
+}
+
+#[test]
+fn cache_open_rejects_dangling_symlinks_without_creating_their_targets() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("temporary directory is created");
+    let target = directory.path().join("missing");
+    let redirect = directory.path().join("redirect");
+    symlink(&target, &redirect).expect("dangling symlink is created");
+
+    for root in [redirect.clone(), redirect.join("gsym")] {
+        assert!(Cache::open(root, CacheEpoch::new(1)).is_err());
+    }
+    assert!(!target.exists());
 }
 
 #[test]

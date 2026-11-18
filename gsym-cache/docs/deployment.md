@@ -28,8 +28,10 @@ with an explicitly configured absolute root. The resolved root must be a
 private directory owned by the effective user. Its parent must prevent an
 untrusted user from replacing the root.
 
-The cache resolves symlinks in an explicit root or the XDG cache-home path
-when it opens. A later change to a symlink does not redirect that cache.
+The cache resolves symlinks to existing directories in an explicit root or
+the XDG cache-home path when it opens. Missing child directories remain valid.
+For XDG paths, the cache-home parent must exist.
+A later change to a symlink does not redirect that cache.
 Paths inside the cache continue to reject symlinks.
 
 Use a separate root for each trust domain. A build ID identifies an artifact;

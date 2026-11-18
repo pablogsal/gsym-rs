@@ -142,12 +142,16 @@ fn publishes_and_reads_through_a_configured_cache_root_symlink() {
     use std::os::unix::fs::{DirBuilderExt as _, symlink};
 
     let directory = tempfile::tempdir().expect("temporary directory is created");
-    let root = directory.path().join("cache");
+    let base = directory
+        .path()
+        .canonicalize()
+        .expect("temporary directory resolves");
+    let root = base.join("cache");
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&root)
         .expect("cache root is created");
-    let redirect = directory.path().join("redirect");
+    let redirect = base.join("redirect");
     symlink(&root, &redirect).expect("cache root symlink is created");
     let redirected = cache(&redirect);
     let build_id = identifier(1);
@@ -300,7 +304,7 @@ fn rejects_a_staged_file_with_the_wrong_build_identifier() {
     let gsym_cache::Error::BuildIdMismatch(mismatch) = error else {
         panic!("unexpected publication error: {error}");
     };
-    let staging_directory = temporary_directory(&root, &expected);
+    let staging_directory = temporary_directory(cache.root(), &expected);
     assert_eq!(mismatch.path().parent(), Some(staging_directory.as_path()));
     assert_eq!(mismatch.expected(), &expected);
     assert_eq!(mismatch.actual_len(), actual.len());
