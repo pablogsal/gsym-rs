@@ -119,7 +119,7 @@ fn missing_cache_is_a_miss_without_creating_directories() {
 
 #[test]
 fn rejects_a_nonprivate_cache_root() {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     let directory = tempfile::tempdir().expect("temporary directory is created");
     let root = directory.path().join("cache");
@@ -127,10 +127,39 @@ fn rejects_a_nonprivate_cache_root() {
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o750))
         .expect("cache root permissions are changed");
 
-    assert!(matches!(
-        Cache::open(root, CacheEpoch::new(1)),
-        Err(gsym_cache::Error::InsecureDirectory { .. })
-    ));
+    let redirect = directory.path().join("redirect");
+    symlink(&root, &redirect).expect("cache root symlink is created");
+    for path in [&root, &redirect] {
+        assert!(matches!(
+            Cache::open(path, CacheEpoch::new(1)),
+            Err(gsym_cache::Error::InsecureDirectory { .. })
+        ));
+    }
+}
+
+#[test]
+fn publishes_and_reads_through_a_configured_cache_root_symlink() {
+    use std::os::unix::fs::{DirBuilderExt as _, symlink};
+
+    let directory = tempfile::tempdir().expect("temporary directory is created");
+    let root = directory.path().join("cache");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("cache root is created");
+    let redirect = directory.path().join("redirect");
+    symlink(&root, &redirect).expect("cache root symlink is created");
+    let redirected = cache(&redirect);
+    let build_id = identifier(1);
+    publish(&redirected, &build_id, 64);
+
+    assert_eq!(redirected.root(), root);
+    assert!(
+        cache(&redirect)
+            .lookup(&build_id)
+            .expect("entry is readable")
+            .is_some()
+    );
 }
 
 #[test]

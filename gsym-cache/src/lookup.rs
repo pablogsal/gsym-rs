@@ -77,17 +77,20 @@ pub struct Cache {
 impl Cache {
     /// Opens a cache namespace without creating it.
     ///
-    /// A missing root is valid and produces cache misses. An existing root
-    /// must be a private non-symlink directory owned by the effective user.
+    /// A missing root is valid and produces cache misses. This method resolves
+    /// symlinks in the configured path. The resolved root must be a private
+    /// directory owned by the effective user. Paths inside the cache cannot
+    /// contain symlinks.
     ///
     /// # Errors
     ///
     /// Returns an error if the existing root is insecure or cannot be
     /// inspected.
     pub fn open(root: impl AsRef<Path>, epoch: CacheEpoch) -> Result<Self> {
-        let supplied_root = root.as_ref();
-        let root = std::path::absolute(supplied_root)
-            .map_err(|source| io_error("resolve absolute cache root", supplied_root, source))?;
+        Self::open_resolved(resolve_cache_path(root.as_ref())?, epoch)
+    }
+
+    fn open_resolved(root: PathBuf, epoch: CacheEpoch) -> Result<Self> {
         let identity = OnceLock::new();
         if let Some(existing) = inspect_root(&root)? {
             let _ = identity.set(existing);
@@ -116,6 +119,9 @@ impl Cache {
     /// `$HOME/.cache` as required by the XDG Base Directory Specification.
     /// `application` must be one normal path component. The resulting root is
     /// `<cache-home>/<application>/gsym`.
+    /// Symlinks in the cache-home path resolve before ownership and permission
+    /// checks. Application directories and paths inside the cache cannot
+    /// contain symlinks.
     ///
     /// Privileged applications should use [`Cache::open`] with an explicitly
     /// configured root instead of trusting process environment variables.
@@ -131,7 +137,7 @@ impl Cache {
             std::env::var_os("HOME"),
         )?;
         validated_xdg_paths(&root)?;
-        let cache = Self::open(root, epoch)?;
+        let cache = Self::open_resolved(root, epoch)?;
         #[cfg(feature = "access")]
         {
             let mut cache = cache;
@@ -144,7 +150,7 @@ impl Cache {
         }
     }
 
-    /// Returns the user-configured cache root.
+    /// Returns the resolved cache root.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -670,6 +676,38 @@ fn probe_directory(path: &Path) -> io::Result<()> {
     .map_err(io::Error::from)
 }
 
+fn resolve_cache_path(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)
+        .map_err(|source| io_error("resolve absolute cache root", path, source))?;
+    if absolute
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(Error::InsecureDirectory { path: absolute });
+    }
+    // Resolve the existing prefix without creating a cache on a read-only open.
+    for ancestor in absolute.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(resolved) => {
+                let suffix =
+                    absolute
+                        .strip_prefix(ancestor)
+                        .map_err(|_| Error::InsecureDirectory {
+                            path: absolute.clone(),
+                        })?;
+                return Ok(resolved.join(suffix));
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(io_error("resolve cache path", path, source)),
+        }
+    }
+    Err(io_error(
+        "resolve cache path",
+        path,
+        io::ErrorKind::NotFound.into(),
+    ))
+}
+
 fn xdg_cache_root(
     application: &OsStr,
     xdg_cache_home: Option<OsString>,
@@ -695,7 +733,9 @@ fn xdg_cache_root(
                 .map(|path| path.join(".cache"))
         })
         .ok_or(Error::CacheHomeUnavailable)?;
-    Ok(base.join(application_path).join("gsym"))
+    Ok(resolve_cache_path(&base)?
+        .join(application_path)
+        .join("gsym"))
 }
 
 #[cfg(test)]
@@ -728,6 +768,45 @@ mod tests {
     fn xdg_cache_root_rejects_unsafe_or_unresolved_paths() {
         assert!(xdg_cache_root("../chronon".as_ref(), Some("/cache".into()), None).is_err());
         assert!(xdg_cache_root("chronon".as_ref(), None, Some("relative".into())).is_err());
+    }
+
+    #[test]
+    fn xdg_cache_root_resolves_cache_home_and_home_symlinks() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let directory = tempfile::tempdir().expect("temporary directory is created");
+        let home = directory.path().join("home");
+        let cache_home = directory.path().join("cache-home");
+        std::fs::create_dir(&home).expect("home directory is created");
+        std::fs::create_dir(&cache_home).expect("cache home is created");
+        symlink(&cache_home, home.join(".cache")).expect("cache home symlink is created");
+        let home_link = directory.path().join("home-link");
+        symlink(&home, &home_link).expect("home symlink is created");
+        let expected = cache_home.join("chronon/gsym");
+
+        for root in [
+            xdg_cache_root("chronon".as_ref(), Some(home.join(".cache").into()), None),
+            xdg_cache_root("chronon".as_ref(), None, Some(home_link.into())),
+        ] {
+            let root = root.expect("cache location resolves");
+            assert_eq!(root, expected);
+            validated_xdg_paths(&root).expect("resolved cache anchors are secure");
+        }
+        assert!(!expected.exists());
+
+        std::fs::set_permissions(&cache_home, std::fs::Permissions::from_mode(0o770))
+            .expect("cache home becomes shared writable");
+        assert!(validated_xdg_paths(&expected).is_err());
+
+        std::fs::remove_file(home.join(".cache")).expect("cache home symlink is removed");
+        let missing = xdg_cache_root(
+            "chronon".as_ref(),
+            None,
+            Some(directory.path().join("home-link").into()),
+        )
+        .expect("missing cache home resolves through the home symlink");
+        assert_eq!(missing, home.join(".cache/chronon/gsym"));
+        assert!(!home.join(".cache").exists());
     }
 
     #[test]
